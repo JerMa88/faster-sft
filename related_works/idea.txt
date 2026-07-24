@@ -1,0 +1,17 @@
+Why fine-tuned LLMs memorize facts they can't use
+
+A new paper reverse-engineers what happens inside a model during fine-tuning to explain a frustrating pattern: you teach it a new fact, it recalls it perfectly, yet it still fails when you ask it to reason with that fact.
+
+→ Recalling a fact and reasoning with it are two different skills. The model memorizes a new fact in a couple of epochs, but using it in reasoning appears 4 to 5 epochs later and remains weaker. The authors call this the Knowing-Using Gap.
+
+→ The cause is placement. Fine-tuning writes the fact into the early and late layers, so it can be recalled directly. But multi-step reasoning runs in the middle layers, and the fact never reaches them.
+
+→ To prove it, they copy the fact's internal representation from an early or late layer and paste it into a middle layer. Reasoning suddenly works. The knowledge was there all along, just in the wrong spot.
+
+→ One fixed pair of layer moves, no per-example search, recovers 58 to 75% of the achievable gain. The bottleneck isn't model size or training time. It's where the knowledge lands.
+
+Note that this is a diagnostic, not a training method. Self-patching relocates a representation to a fixed position after training, so the 58 to 75% range is an upper bound on what a clean intervention could achieve, and the tests only cover knowledge-graph facts in biomedicine and academia. 
+
+It pairs well with Allen-Zhu and Li's "Physics of Language Models", which showed LLMs store knowledge they struggle to use without chain-of-thought reasoning.
+
+
