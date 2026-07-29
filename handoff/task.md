@@ -5,8 +5,9 @@
   - `[x]` Verify model loads (Using sapientinc/HRM-Text-1B from cache due to huggingface.co block)
   - `[x]` Confirm forward hook extraction works for any layer index
 - `[/]` Phase 1: Data Preparation
-  - `[x]` Download STaRK-Prime (Blocked, using synthetic dataset generation)
-  - `[x]` Download STaRK-MAG (Blocked, using synthetic dataset generation)
+  - `[x]` Download STaRK-Prime (Download from hf snap-stanford/stark)
+  - `[x]` Download STaRK-MAG (Download from hf snap-stanford/stark)
+  - `[x]` Download STaRK-Amazon (Download from hf snap-stanford/stark)
   - `[x]` Build memorization-to-generalization QA pairs (Using 2000 synthetic pairs)
   - `[x]` Implement entity span finder: locate entity name tokens via exact-match
   - `[x]` Implement `paired_dataloader.py`: batch item (P_mem, P_gen, entity_span_mem, entity_span_gen, y*)
