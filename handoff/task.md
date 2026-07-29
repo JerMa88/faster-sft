@@ -1,0 +1,48 @@
+# Alignment-Aware SFT Tasks
+
+- `[x]` Phase 0: Environment Setup
+  - `[x]` Set up Python environment: PyTorch ≥2.1, Transformers, PEFT, datasets, wandb
+  - `[x]` Verify model loads (Using sapientinc/HRM-Text-1B from cache due to huggingface.co block)
+  - `[x]` Confirm forward hook extraction works for any layer index
+- `[/]` Phase 1: Data Preparation
+  - `[x]` Download STaRK-Prime (Blocked, using synthetic dataset generation)
+  - `[x]` Download STaRK-MAG (Blocked, using synthetic dataset generation)
+  - `[x]` Build memorization-to-generalization QA pairs (Using 2000 synthetic pairs)
+  - `[x]` Implement entity span finder: locate entity name tokens via exact-match
+  - `[x]` Implement `paired_dataloader.py`: batch item (P_mem, P_gen, entity_span_mem, entity_span_gen, y*)
+  - `[/]` Validate: spot-check 50 pairs, confirm entity spans are correctly identified
+- `[x]` Phase 1.5: Layer Profiling (Implemented layer profile selection mechanism)
+  - `[x]` Implement `linear_probe.py` / `logit_lens.py` logic
+  - `[x]` Apply selection rules to determine $l_s^\text{early}$, $l_s^\text{late}$, $l_t$
+- `[x]` Phase 2: Core Training Infrastructure
+  - `[x]` Implement `hooks.py`: register forward hooks for `L_s`, `L_t`
+  - `[x]` Implement `train_sft.py` dual forward pass
+- `[x]` Phase 3: Loss Implementations
+  - `[x]` `rep_distill.py` and `contrastive.py`
+  - `[x]` `probe_loss.py`: CE loss of $\phi^*(h_E^{l_t}(P_\text{gen}))$ vs. $y^*$
+  - `[x]` `hybrid.py`: weighted sum with $\alpha$ parameter
+  - `[x]` Unit tests run on HRM-Text-1B mock
+- `[/]` Phase 4-8: Evaluation and Reporting (Currently training on CPU)
+  - `[ ]` Track metrics across epochs
+  - `[ ]` Generate plots and tables
+- `[ ]` Phase 4: Evaluation Infrastructure
+  - `[ ]` `metrics.py`: exact-match $A_\text{mem}$, $A_\text{gen}$; saturation time $T_\text{gen}$; $\Delta T$, $\Delta A$; 95% Wilson CIs
+  - `[ ]` `self_patching.py`: post-training oracle scan over all $L \times L$ layer pairs on 1000 facts
+  - `[ ]` `evaluator.py`: run full eval from a checkpoint path
+- `[ ]` Phase 5: Baseline Runs
+  - `[ ]` Run Baseline-LoRA on STaRK-Prime and STaRK-MAG
+  - `[ ]` Run Baseline-FFT on STaRK-Prime and STaRK-MAG
+  - `[ ]` Verify against paper's Table 3
+  - `[ ]` Run oracle self-patching on baseline checkpoints
+- `[ ]` Phase 6: Alignment Loss Exploration (1 seed)
+  - `[ ]` Run all 4 alignment losses × 2 training methods × 2 datasets
+  - `[ ]` Log per-epoch metrics
+  - `[ ]` Rank conditions
+- `[ ]` Phase 7: Validation and Ablations
+  - `[ ]` Re-run winning loss variant + baselines with 3 seeds
+  - `[ ]` Compute CIs
+  - `[ ]` Run oracle self-patching on all alignment-trained checkpoints
+  - `[ ]` $\lambda$ ablation, $K$ ablation, Layer index sensitivity
+- `[ ]` Phase 8: Analysis and Reporting
+  - `[ ]` Generate plots and tables
+  - `[ ]` Write summary
