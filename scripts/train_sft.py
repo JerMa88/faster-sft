@@ -50,7 +50,9 @@ def parse_args():
     p.add_argument("--warmup_epochs", type=int, default=3,
                    help="Epochs before alignment loss activates (K)")
     p.add_argument("--batch_size", type=int, default=0,
-                   help="Batch size per GPU (0=auto-select from VRAM)")
+                   help="Per-device batch size (0 = auto based on VRAM)")
+    p.add_argument("--gradient_accumulation_steps", type=int, default=16,
+                   help="Number of steps to accumulate gradients")
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--lora_rank", type=int, default=16)
     p.add_argument("--layer_profile", type=str,
@@ -84,11 +86,10 @@ def auto_batch_size(device: torch.device, model_param_bytes: int) -> int:
     total_vram = torch.cuda.get_device_properties(device).total_memory
     weight_gb   = model_param_bytes / 1e9
     avail_gb    = total_vram / 1e9 - weight_gb - 4.0   # 4 GB headroom
-    # Each 512-token bfloat16 sequence at hidden_size 1536 ≈ ~0.15 GB per batch item (dual pass)
-    est_batch = max(8, int(avail_gb / 0.30))
-    # Cap at 64 for numerical stability
-    return min(est_batch, 64)
-
+    # The cross-entropy logits (B * L * Vocab) can take tens of GBs alone.
+    # We cap at 4 to prevent CUDA OOM on models with large vocabularies.
+    est_batch = max(2, int(avail_gb / 4.0))
+    return min(est_batch, 4)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer index loading
@@ -355,8 +356,6 @@ def train(args):
                            (args.loss_variant != "baseline")
 
         for step, batch in enumerate(loader):
-            optimizer.zero_grad(set_to_none=True)
-
             mem_ids  = batch["mem_input_ids"].to(device)
             gen_ids  = batch["gen_input_ids"].to(device)
             mem_span = batch["mem_span"]
@@ -433,12 +432,15 @@ def train(args):
                 total_loss = ce_loss
 
             # ── Backward ──────────────────────────────────────────────────────
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
+            scaler.scale(total_loss / args.gradient_accumulation_steps).backward()
+            
+            if (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == len(loader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
 
             epoch_loss    += total_loss.item()
             epoch_ce_loss += ce_loss.item()
