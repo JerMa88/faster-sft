@@ -176,9 +176,6 @@ def run_logit_lens(model, tokenizer, data_path, n_samples, device, dtype) -> dic
     print("\n  [Metric 2] Running logit-lens KL sweep …")
 
     # Get the unembedding matrix (lm_head or embed_out)
-    base = model
-    if hasattr(base, "base_model"):
-        base = base.base_model.model
     # Access lm_head weight
     lm_head = None
     for name in ["lm_head", "embed_out"]:
@@ -368,10 +365,13 @@ def main():
         if (
             hasattr(nb_cfg, "rope_scaling")
             and isinstance(nb_cfg.rope_scaling, dict)
-            and "type" not in nb_cfg.rope_scaling
         ):
-            nb_cfg.rope_scaling["type"] = "linear"
-            print("  [Nanbeige] Patched rope_scaling: added type='linear'")
+            # Nanbeige's _init_rope() requires both 'type' and 'factor'
+            if "type" not in nb_cfg.rope_scaling:
+                nb_cfg.rope_scaling["type"] = "linear"
+            if "factor" not in nb_cfg.rope_scaling:
+                nb_cfg.rope_scaling["factor"] = 1.0
+            print("  [Nanbeige] Patched rope_scaling:", nb_cfg.rope_scaling)
         extra_kwargs["config"] = nb_cfg
 
     model = AutoModelForCausalLM.from_pretrained(
