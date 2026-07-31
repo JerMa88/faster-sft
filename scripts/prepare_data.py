@@ -41,15 +41,15 @@ from huggingface_hub import hf_hub_download
 STARK_CONFIGS = {
     "prime": {
         "hf_name":     "snap-stanford/stark",
-        "hf_config":   "prime",
+        "hf_config":   "STaRK-Prime",   # actual HF config name (case-sensitive)
         "skb_repo":    "snap-stanford/stark",
-        "skb_file":    "skb/prime/processed.zip",   # path inside the repo
+        "skb_file":    "skb/prime/processed.zip",
         "output_file": "data/processed/stark_prime_qa.jsonl",
         "label":       "STaRK-Prime",
     },
     "mag": {
         "hf_name":     "snap-stanford/stark",
-        "hf_config":   "mag",
+        "hf_config":   "STaRK-MAG",     # actual HF config name (case-sensitive)
         "skb_repo":    "snap-stanford/stark",
         "skb_file":    "skb/mag/processed.zip",
         "output_file": "data/processed/stark_mag_qa.jsonl",
