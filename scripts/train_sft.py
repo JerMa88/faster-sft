@@ -75,21 +75,26 @@ def parse_args():
 # VRAM-aware batch size selection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def auto_batch_size(device: torch.device, model_param_bytes: int) -> int:
+def auto_batch_size(device: torch.device, model_param_bytes: int, vocab_size: int = 32000) -> int:
     """
-    Heuristic: on an A100-80G, a 1.5B bfloat16 model uses ~3 GB of weights.
-    Leave 20 GB for activations and allow batch_size ∝ remaining VRAM.
-    Dual forward pass doubles the activation memory, so we halve the estimate.
+    VRAM-aware batch size selection targeting ~55-65 GB VRAM on 80 GB GPUs.
+    Considers activation memory (dual forward pass) and vocabulary-dependent 
+    cross-entropy logit allocation (4096 * vocab_size bytes per batch item).
     """
     if device.type != "cuda":
         return 4
-    total_vram = torch.cuda.get_device_properties(device).total_memory
-    weight_gb   = model_param_bytes / 1e9
-    avail_gb    = total_vram / 1e9 - weight_gb - 4.0   # 4 GB headroom
-    # The cross-entropy logits (B * L * Vocab) can take tens of GBs alone.
-    # We cap at 4 to prevent CUDA OOM on models with large vocabularies.
-    est_batch = max(2, int(avail_gb / 4.0))
-    return min(est_batch, 4)
+    total_vram = torch.cuda.get_device_properties(device).total_memory / 1e9  # GB
+    weight_gb  = model_param_bytes / 1e9
+    # Reserve 18 GB safety margin for PyTorch allocator overhead and peak activation workspace
+    target_vram = max(20.0, total_vram - 18.0)
+    avail_gb   = max(5.0, target_vram - weight_gb)
+    
+    # Activation memory per batch item (~0.35 GB) + Logit/CE memory per batch item (8 * 512 * V bytes)
+    item_mem_gb = 0.35 + (8.0 * 512.0 * vocab_size / 1e9)
+    est_batch = int(avail_gb / item_mem_gb)
+    # Cap at 32 for optimal compute speed & high VRAM utilization across all models
+    batch_size = max(2, min(est_batch, 32))
+    return batch_size
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer index loading
@@ -270,12 +275,13 @@ def train(args):
         l_s_early, l_s_late, l_t = indices
 
     # ── Batch size ────────────────────────────────────────────────────────────
+    vocab_sz = getattr(tokenizer, "vocab_size", 32000)
     if args.batch_size == 0:
         param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
-        batch_size  = auto_batch_size(device, param_bytes)
+        batch_size  = auto_batch_size(device, param_bytes, vocab_sz)
     else:
         batch_size = args.batch_size
-    print(f"  Batch size : {batch_size}")
+    print(f"  Batch size : {batch_size} (Vocab size: {vocab_sz})")
 
     # ── Load φ* probe (for probe / hybrid variants) ───────────────────────────
     phi_probe    = None

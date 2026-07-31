@@ -47,6 +47,8 @@ elif [[ -z "${HF_TOKEN:-}" ]]; then
     echo ">>> [WARN] HF_TOKEN not set — gated models (llama3.2-3b, antares-1b) will fail to download."
 fi
 
+export PYTHONUNBUFFERED=1
+
 WORK_DIR="/projects/mhahsler/course_recomm/allocation001/AI_Club/paper/faster-sft"
 PYTHON="/users/jerryma/.conda/envs/torch2.8/bin/python"
 HF_CACHE="${WORK_DIR}/hf_cache"
