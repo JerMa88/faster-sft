@@ -230,7 +230,7 @@ def run_logit_lens(model, tokenizer, data_path, n_samples, device, dtype) -> dic
             for l in range(L):
                 if l not in cache.cache:
                     continue
-                h = cache.cache[l].float()  # (B, D)
+                h = cache.cache[l].to(dtype)  # (B, D)
                 # Apply final layer norm
                 if final_ln is not None:
                     try:
