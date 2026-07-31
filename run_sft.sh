@@ -188,9 +188,40 @@ done
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3b. Self-Patching Scan — update l_t in layer_profile after epoch-3 checkpoint
+#     Uses the STaRK-Prime baseline epoch-3 checkpoint (the warmup checkpoint).
+#     This refines l_t from the heuristic ~0.5L to the empirically optimal value.
+# ─────────────────────────────────────────────────────────────────────────────
+WARMUP_CKPT="${WORK_DIR}/outputs/runs/${MODEL_KEY}/stark_prime/baseline--${MODEL_ID//\//-}-baseline_lam0.0_seed42/checkpoint_epoch3"
+
+# Find the actual checkpoint directory (run slug may vary slightly)
+WARMUP_CKPT_FOUND=$(find "${WORK_DIR}/outputs/runs/${MODEL_KEY}/stark_prime" \
+    -maxdepth 2 -name "checkpoint_epoch3" -type d 2>/dev/null | head -1)
+
+if [[ -n "${WARMUP_CKPT_FOUND}" ]]; then
+    echo ">>> [3b/6] Running self-patch scan on warmup checkpoint …"
+    echo "    Checkpoint: ${WARMUP_CKPT_FOUND}"
+    ${PYTHON} -m src.profiling.self_patch_scan \
+        --checkpoint    "${WARMUP_CKPT_FOUND}" \
+        --model_id      "${MODEL_ID}" \
+        --data_path     "${PRIME_DATA}" \
+        --profile_path  "${PROFILE_PATH}" \
+        --n_samples     100 \
+        --plots_dir     "outputs/plots/${MODEL_KEY}" \
+        --hf_cache      "${HF_CACHE}" \
+        2>&1
+    echo ">>> Self-patch scan done at $(date). l_t updated in ${PROFILE_PATH}"
+else
+    echo ">>> [3b/6] Warmup checkpoint (epoch3) not found — skipping self-patch scan."
+    echo "    Alignment variants will use heuristic l_t from layer profile."
+fi
+echo ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. Alignment-Aware LoRA — all 4 variants, both datasets
 # ─────────────────────────────────────────────────────────────────────────────
-echo ">>> [4/5] Alignment-aware LoRA sweep …"
+echo ">>> [4/6] Alignment-aware LoRA sweep …"
 
 LAMBDA=0.1
 WARMUP=3
