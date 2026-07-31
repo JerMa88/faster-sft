@@ -111,17 +111,32 @@ def load_node_info(dataset_name: str) -> dict:
 # Node text serialiser
 # ─────────────────────────────────────────────────────────────────────────────
 
+def get_node_name(node: dict) -> str:
+    if not isinstance(node, dict):
+        return ""
+    for k in ["name", "DisplayName", "display_name", "title", "label"]:
+        val = node.get(k)
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
 def node_to_doc(node: dict) -> str:
     """Convert a node_info entry into a short textual document."""
-    name    = node.get("name", "Unknown")
-    type_   = node.get("type", "Entity")
+    name    = get_node_name(node) or "Unknown"
+    type_   = node.get("type") or node.get("category") or "Entity"
     details = node.get("details", {}) or {}
     lines   = [f"Entity: {name}", f"Type: {type_}"]
-    for k, v in details.items():
-        if str(k).startswith("_"):
-            continue
-        v_str = str(v)[:200]   # truncate long field values
-        lines.append(f"{k}: {v_str}")
+    if isinstance(details, dict) and details:
+        for k, v in details.items():
+            if str(k).startswith("_"):
+                continue
+            lines.append(f"{k}: {str(v)[:200]}")
+    else:
+        for k, v in node.items():
+            if k in ["name", "DisplayName", "display_name", "type", "id"]:
+                continue
+            lines.append(f"{k}: {str(v)[:200]}")
     return "\n".join(lines)
 
 
@@ -223,7 +238,7 @@ def build_qa_pairs(dataset_name: str, num_facts: int = 1000,
             if key is None:
                 continue
             n = forward.get(key) or inverted.get(key)
-            if n and isinstance(n, dict) and n.get("name"):
+            if n and isinstance(n, dict) and get_node_name(n):
                 return n
         return None
 
@@ -264,7 +279,7 @@ def build_qa_pairs(dataset_name: str, num_facts: int = 1000,
         for a_id in ans_ids:
             node = _lookup_node(a_id)
             if node:
-                entity_name = node["name"].strip()
+                entity_name = get_node_name(node)
                 break
 
         # One-time diagnostic if all lookups fail
