@@ -43,14 +43,27 @@ from src.data.paired_dataloader import get_dataloader
 # ─────────────────────────────────────────────────────────────────────────────
 
 def count_layers(model) -> int:
+    """
+    Count decoder layers regardless of model architecture.
+
+    IMPORTANT: Do NOT use model.base_model — transformers.PreTrainedModel exposes
+    a base_model @property on ALL models, not just PEFT wrappers. Using it causes
+    double-unwrapping (ForCausalLM → inner Model → AttributeError on .model).
+    """
+    # Only unwrap real PEFT wrappers (they have peft_config attribute)
     base = model
-    if hasattr(base, "base_model"):
+    if hasattr(base, "peft_config"):          # PeftModel
         base = base.base_model.model
+    # Standard: ForCausalLM → .model → .layers
     if hasattr(base, "model") and hasattr(base.model, "layers"):
         return len(base.model.layers)
+    # Bare inner model with direct .layers
     if hasattr(base, "layers"):
         return len(base.layers)
-    raise ValueError("Cannot determine layer count.")
+    raise ValueError(
+        f"Cannot determine layer count for {type(model).__name__}. "
+        f"Visible attrs: {[a for a in dir(base) if not a.startswith('_')]}"
+    )
 
 
 def collect_hidden_states(model, tokenizer, data_path, n_samples, device, dtype):
@@ -343,12 +356,31 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     model_path = args.checkpoint if args.checkpoint else args.model_id
+
+    # Nanbeige4.2-3B has a rope_scaling dict without the required 'type' key.
+    # Patch the config before loading to avoid KeyError in _init_rope().
+    extra_kwargs = {}
+    if "nanbeige" in args.model_id.lower():
+        from transformers import AutoConfig
+        nb_cfg = AutoConfig.from_pretrained(
+            model_path, cache_dir=args.hf_cache, trust_remote_code=True
+        )
+        if (
+            hasattr(nb_cfg, "rope_scaling")
+            and isinstance(nb_cfg.rope_scaling, dict)
+            and "type" not in nb_cfg.rope_scaling
+        ):
+            nb_cfg.rope_scaling["type"] = "linear"
+            print("  [Nanbeige] Patched rope_scaling: added type='linear'")
+        extra_kwargs["config"] = nb_cfg
+
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         cache_dir=args.hf_cache,
-        torch_dtype=dtype,
+        dtype=dtype,                                  # replaces deprecated torch_dtype
         device_map="cuda" if device.type == "cuda" else "cpu",
         trust_remote_code=True,
+        **extra_kwargs,
     )
     L = count_layers(model)
     print(f"  Model layers (L) = {L}")

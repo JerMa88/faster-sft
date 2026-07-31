@@ -191,9 +191,46 @@ def build_qa_pairs(dataset_name: str, num_facts: int = 1000,
     else:
         raise RuntimeError("No items found in any split of the dataset.")
 
+    # ── Build universal lookup (forward + inverted) ────────────────────────────
+    # Diagnostic: show what key format node_info actually uses
+    if node_info:
+        sample_keys = list(node_info.keys())[:3]
+        first_val   = node_info[sample_keys[0]]
+        print(f"  node_info first 3 keys : {sample_keys} (type={type(sample_keys[0]).__name__})")
+        if isinstance(first_val, dict):
+            print(f"  node_info sample val   : { {k: v for k, v in list(first_val.items())[:4]} }")
+        # Build lookup that covers: sequential int key, sequential str key,
+        # external-id int (stored in node['id']), external-id str.
+        forward  = {}   # sequential key → node
+        inverted = {}   # external id   → node
+        for k, v in node_info.items():
+            forward[k]      = v
+            forward[str(k)] = v          # str version of sequential key
+            if isinstance(v, dict) and "id" in v:
+                ext_id = v["id"]
+                inverted[ext_id]      = v
+                inverted[str(ext_id)] = v
+                if isinstance(ext_id, str) and ext_id.isdigit():
+                    inverted[int(ext_id)] = v
+    else:
+        forward = inverted = {}
+
+    def _lookup_node(a_id):
+        """Try all four ID-format combinations to find a node."""
+        for key in [a_id,
+                    str(a_id),
+                    int(a_id) if isinstance(a_id, str) and a_id.isdigit() else None]:
+            if key is None:
+                continue
+            n = forward.get(key) or inverted.get(key)
+            if n and isinstance(n, dict) and n.get("name"):
+                return n
+        return None
+
     # ── Build pairs ────────────────────────────────────────────────────────────
-    qa_pairs = []
-    skipped  = 0
+    qa_pairs      = []
+    skipped       = 0
+    diag_printed  = False   # print one failed-lookup diagnostic
 
     for item in raw_items:
         if len(qa_pairs) >= num_facts:
@@ -213,15 +250,21 @@ def build_qa_pairs(dataset_name: str, num_facts: int = 1000,
         else:
             ans_ids = []
 
-        # Find the first answer entity in node_info
+        # Find the first answer entity
         entity_name = None
         node        = None
         for a_id in ans_ids:
-            # node_info keys may be int or str
-            node = node_info.get(a_id) or node_info.get(str(a_id))
-            if node and node.get("name"):
+            node = _lookup_node(a_id)
+            if node:
                 entity_name = node["name"].strip()
                 break
+
+        # One-time diagnostic if all lookups fail
+        if not entity_name and ans_ids and not diag_printed:
+            print(f"  [DIAG] First failed answer_ids: {ans_ids[:3]} "
+                  f"(type={type(ans_ids[0]).__name__}). "
+                  f"Checking forward keys sample: {sample_keys[:3]}")
+            diag_printed = True
 
         if not entity_name:
             skipped += 1
