@@ -387,12 +387,18 @@ def train(args):
                 model, [l_t], rep_cache, gen_spans_list
             )
 
-            # Mask labels: only supervise the answer portion (after entity span)
+            # Mask labels: only supervise the answer portion (after query prompt)
             labels = gen_ids.clone()
             for b_idx in range(gen_ids.size(0)):
-                s_start, s_end = int(gen_span[b_idx][0]), int(gen_span[b_idx][1])
-                labels[b_idx, :s_start] = -100
-                labels[b_idx, s_end:]   = -100
+                s_start = int(gen_span[b_idx][0])
+                if s_start > 0:
+                    labels[b_idx, :s_start] = -100
+                # Mask pad tokens
+                if tokenizer.pad_token_id is not None:
+                    labels[b_idx, gen_ids[b_idx] == tokenizer.pad_token_id] = -100
+                # Ensure at least 1 token per sequence is supervised to prevent NaN loss
+                if (labels[b_idx] != -100).sum() == 0:
+                    labels[b_idx, -1] = gen_ids[b_idx, -1]
 
             with torch.amp.autocast("cuda", dtype=dtype, enabled=use_amp):
                 outputs  = model(gen_ids, labels=labels)
@@ -438,15 +444,22 @@ def train(args):
                 total_loss = ce_loss
 
             # ── Backward ──────────────────────────────────────────────────────
-            scaler.scale(total_loss / args.gradient_accumulation_steps).backward()
-            
-            if (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == len(loader):
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+            if use_amp and dtype == torch.float16:
+                scaler.scale(total_loss / args.gradient_accumulation_steps).backward()
+                if (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == len(loader):
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+            else:
+                (total_loss / args.gradient_accumulation_steps).backward()
+                if (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == len(loader):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
 
             epoch_loss    += total_loss.item()
             epoch_ce_loss += ce_loss.item()
