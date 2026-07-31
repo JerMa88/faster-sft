@@ -5,7 +5,7 @@
 #
 #  Model keys and their HuggingFace IDs:
 #    llama3.2-3b      → meta-llama/Llama-3.2-3B-Instruct
-#    qwen3.5-1.5b     → Qwen/Qwen3.5-1.5B
+#    qwen3.5-2b       → Qwen/Qwen3.5-2B
 #    gemma2-2b        → google/gemma-2-2b-it
 #    antares-1b       → fdtn-ai/antares-1b
 #    nanbeige4.2-3b   → Nanbeige/Nanbeige4.2-3B
@@ -14,7 +14,7 @@
 #  Examples:
 #    sbatch run_sft.sh llama3.2-3b
 #    sbatch run_sft.sh qwen3.5-1.5b
-#    for m in llama3.2-3b qwen3.5-1.5b gemma2-2b antares-1b nanbeige4.2-3b lfm2.5-1.2b; do
+#    for m in llama3.2-3b qwen3.5-2b gemma2-2b antares-1b nanbeige4.2-3b lfm2.5-1.2b; do
 #        sbatch run_sft.sh "$m"
 #    done
 # ════════════════════════════════════════════════════════════════════════════
@@ -54,14 +54,14 @@ HF_CACHE="${WORK_DIR}/hf_cache"
 # Map model key → HuggingFace model ID
 case "${MODEL_KEY}" in
   llama3.2-3b)      MODEL_ID="meta-llama/Llama-3.2-3B-Instruct" ;;
-  qwen3.5-1.5b)     MODEL_ID="Qwen/Qwen3.5-1.5B" ;;
+  qwen3.5-2b)       MODEL_ID="Qwen/Qwen3.5-2B" ;;
   gemma2-2b)        MODEL_ID="google/gemma-2-2b-it" ;;
   antares-1b)       MODEL_ID="fdtn-ai/antares-1b" ;;
   nanbeige4.2-3b)   MODEL_ID="Nanbeige/Nanbeige4.2-3B" ;;
   lfm2.5-1.2b)      MODEL_ID="LiquidAI/LFM2.5-1.2B-Base" ;;
   *)
     echo "[ERROR] Unknown model key: '${MODEL_KEY}'"
-    echo "        Valid keys: llama3.2-3b qwen3.5-1.5b gemma2-2b antares-1b nanbeige4.2-3b lfm2.5-1.2b"
+    echo "        Valid keys: llama3.2-3b qwen3.5-2b gemma2-2b antares-1b nanbeige4.2-3b lfm2.5-1.2b"
     exit 1
     ;;
 esac

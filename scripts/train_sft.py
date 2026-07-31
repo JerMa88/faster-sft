@@ -2,7 +2,7 @@
 Alignment-Aware SFT Training Script
 =====================================
 Usage:
-    python scripts/train_sft.py --model_id Qwen/Qwen2.5-1.5B \
+    python scripts/train_sft.py --model_id Qwen/Qwen3.5-2B \
         --data_path data/processed/stark_prime_qa.jsonl \
         --loss_variant contrastive \
         --epochs 50 --lambda_align 0.1 --warmup_epochs 3
@@ -35,8 +35,8 @@ from src.training.losses import contrastive_loss, rep_distill_loss
 
 def parse_args():
     p = argparse.ArgumentParser(description="Alignment-aware SFT training")
-    p.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-1.5B",
-                   help="HuggingFace model ID (e.g. Qwen/Qwen2.5-1.5B)")
+    p.add_argument("--model_id", type=str, default="Qwen/Qwen3.5-2B",
+                   help="HuggingFace model ID (e.g. Qwen/Qwen3.5-2B)")
     p.add_argument("--data_path", type=str,
                    default="data/processed/stark_prime_qa.jsonl")
     p.add_argument("--loss_variant", type=str,
@@ -60,7 +60,7 @@ def parse_args():
                    help="Path to probe_phi_<model_key>.pt (for probe/hybrid variants). "
                         "Auto-detected from --model_key if not given.")
     p.add_argument("--model_key", type=str, default=None,
-                   help="Short model key (e.g. qwen3.5-1.5b) for auto-finding probe file")
+                   help="Short model key (e.g. qwen3.5-2b) for auto-finding probe file")
     p.add_argument("--out_dir", type=str, default="outputs/runs",
                    help="Directory for checkpoints and metrics")
     p.add_argument("--seed", type=int, default=42)
@@ -98,10 +98,8 @@ def auto_batch_size(device: torch.device, model_param_bytes: int) -> int:
 # These are used when layer_profile.json has not been produced yet.
 # Format: model_family_key -> (l_s_early, l_s_late, l_t)
 LAYER_DEFAULTS = {
-    # Qwen2.5-1.5B: 28 layers
-    "qwen2.5-1.5b": (4, 24, 13),
-    # Qwen3.5-1.5B: 28 layers (same architecture family)
-    "qwen3.5-1.5b": (4, 24, 13),
+    # Qwen3.5-2B (estimated layers)
+    "qwen3.5-2b": (4, 24, 13),
     # Llama-3.2-3B: 28 layers
     "llama-3.2-3b":  (4, 24, 13),
     # Gemma-4-E4B: 34 layers

@@ -6,7 +6,7 @@ specific decoder layers during a single forward pass.
 
 Supported architectures (auto-detected):
   - meta-llama/Llama-3.2-3B-Instruct   → model.model.layers[i]
-  - Qwen/Qwen3.5-1.5B                   → model.model.layers[i]
+  - Qwen/Qwen3.5-2B                   → model.model.layers[i]
   - google/gemma-2-2b-it                → model.model.layers[i]
   - fdtn-ai/antares-1b                  → model.model.layers[i]
   - Nanbeige/Nanbeige4.2-3B (Looped)    → model.model.layers[i]

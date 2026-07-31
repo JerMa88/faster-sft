@@ -44,7 +44,7 @@ from src.data.paired_dataloader import get_dataloader
 # ── Model key → HF ID map (mirrors run_sft.sh) ───────────────────────────────
 MODEL_IDS = {
     "llama3.2-3b":    "meta-llama/Llama-3.2-3B-Instruct",
-    "qwen3.5-1.5b":   "Qwen/Qwen3.5-1.5B",
+    "qwen3.5-2b":   "Qwen/Qwen3.5-2B",
     "gemma2-2b":       "google/gemma-2-2b-it",
     "antares-1b":     "fdtn-ai/antares-1b",
     "nanbeige4.2-3b": "Nanbeige/Nanbeige4.2-3B",

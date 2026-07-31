@@ -242,11 +242,19 @@ def build_qa_pairs(dataset_name: str, num_facts: int = 1000,
             continue
 
         # Resolve answer entity
+        # The HF dataset stores answer_ids as a STRING like '[95886]', not a Python list.
+        # ast.literal_eval converts it to the actual int or list of ints.
+        import ast
         ans_raw = item.get(ans_key) if ans_key else None
+        if isinstance(ans_raw, str):
+            try:
+                ans_raw = ast.literal_eval(ans_raw)
+            except (ValueError, SyntaxError):
+                pass   # keep as string if unparseable
         if isinstance(ans_raw, (list, tuple)):
-            ans_ids = [a for a in ans_raw if a is not None]
-        elif ans_raw is not None:
-            ans_ids = [ans_raw]
+            ans_ids = [int(a) for a in ans_raw if a is not None]
+        elif isinstance(ans_raw, (int, float)):
+            ans_ids = [int(ans_raw)]
         else:
             ans_ids = []
 

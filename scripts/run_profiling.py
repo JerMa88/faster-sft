@@ -1,5 +1,5 @@
 """
-Phase 1.5 — Empirical Layer Profiling for Qwen2.5-1.5B (or any model)
+Phase 1.5 — Empirical Layer Profiling for Qwen3.5-2B (or any model)
 ========================================================================
 Runs three metrics to determine l_s_early, l_s_late, l_t:
   1. Per-layer linear probe accuracy (sklearn logistic regression)
@@ -9,8 +9,8 @@ Runs three metrics to determine l_s_early, l_s_late, l_t:
 Saves: data/processed/layer_profile.json
 
 Usage:
-    python scripts/run_profiling.py --model_id Qwen/Qwen2.5-1.5B
-    python scripts/run_profiling.py --model_id Qwen/Qwen2.5-1.5B \\
+    python scripts/run_profiling.py --model_id Qwen/Qwen3.5-2B
+    python scripts/run_profiling.py --model_id Qwen/Qwen3.5-2B \\
         --checkpoint outputs/runs/.../checkpoint_epoch3
 """
 
@@ -269,12 +269,18 @@ def select_layers(probe_acc: dict, kl_data: dict, L: int,
                   theta_early: float = 0.6,
                   theta_late:  float = 0.85) -> tuple[int, int, int]:
     """
-    Apply selection rules from implementation_plan.md:
-      l_s_early = first layer > theta_early probe acc
-      l_s_late  = last  layer > theta_late  probe acc
-      l_t       = estimated as ~0.5L (override when self-patching scan runs)
-    Cross-check l_s_early with logit-lens p_correct.
+    Apply selection rules from implementation_plan.md.
+    Falls back to pure heuristics if probe_acc is empty (e.g., no training data).
     """
+    if not probe_acc:
+        print("  [WARN] probe_acc is empty (no data or 0 QA pairs built). "
+              "Using pure heuristics: l_s_early=L//4, l_s_late=3*L//4, l_t=L//2.")
+        l_s_early = max(1, L // 4)
+        l_s_late  = max(l_s_early + 1, 3 * L // 4)
+        l_t       = L // 2
+        print(f"  l_s_early={l_s_early}  l_s_late={l_s_late}  l_t={l_t}")
+        return l_s_early, l_s_late, l_t
+
     layers_sorted = sorted(probe_acc.keys())
 
     # l_s_early
@@ -282,7 +288,6 @@ def select_layers(probe_acc: dict, kl_data: dict, L: int,
     if l_s_early_candidates:
         l_s_early = l_s_early_candidates[0]
     else:
-        # fall back: first local peak
         best = max(probe_acc, key=probe_acc.get)
         l_s_early = best
         print(f"  [WARN] No layer exceeds theta_early={theta_early}; "
@@ -297,7 +302,7 @@ def select_layers(probe_acc: dict, kl_data: dict, L: int,
             if abs(l_s_early_ll - l_s_early) > 2:
                 print(f"  [WARN] Logit-lens suggests l_s_early={l_s_early_ll}, "
                       f"probe suggests {l_s_early}. Difference > 2 layers; "
-                      f"using probe value (logit-lens as cross-check).")
+                      f"using probe value.")
 
     # l_s_late
     l_s_late_candidates = [l for l in layers_sorted if probe_acc[l] > theta_late]
@@ -308,7 +313,7 @@ def select_layers(probe_acc: dict, kl_data: dict, L: int,
         print(f"  [WARN] No layer exceeds theta_late={theta_late}; "
               f"using last layer {l_s_late}.")
 
-    # l_t: reasoning bottleneck — default to ~0.5L, will be overridden by self-patching
+    # l_t: reasoning bottleneck — default to ~0.5L
     l_t = int(0.50 * L)
     print(f"\n  ── Selection results ──────────────────────────────")
     print(f"  l_s_early = {l_s_early}  (probe_acc={probe_acc.get(l_s_early, 'N/A'):.3f})")
@@ -324,7 +329,7 @@ def select_layers(probe_acc: dict, kl_data: dict, L: int,
 def main():
     parser = argparse.ArgumentParser(description="Phase 1.5: Layer profiling")
     parser.add_argument("--model_id", type=str, required=True,
-                        help="HF model ID (e.g. Qwen/Qwen2.5-1.5B)")
+                        help="HF model ID (e.g. Qwen/Qwen3.5-2B)")
     parser.add_argument("--data_path", type=str,
                         default="data/processed/stark_prime_qa.jsonl")
     parser.add_argument("--n_probe_samples", type=int, default=200,
