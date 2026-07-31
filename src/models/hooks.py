@@ -135,7 +135,7 @@ def _get_layer(model: nn.Module, layer_idx: int) -> nn.Module:
     """
     base = model
     # Unwrap PEFT / LoRA wrappers
-    if hasattr(base, "base_model"):
+    if hasattr(base, "peft_config") and hasattr(base, "base_model"):
         base = base.base_model.model
 
     # Legacy HRM-Text (L_module + H_module, 16 layers each)
