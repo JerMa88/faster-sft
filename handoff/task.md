@@ -4,46 +4,43 @@
   - `[x]` Set up Python environment: PyTorch ≥2.1, Transformers, PEFT, datasets, wandb
   - `[x]` Verify model loads (Using sapientinc/HRM-Text-1B from cache due to huggingface.co block)
   - `[x]` Confirm forward hook extraction works for any layer index
-- `[/]` Phase 1: Data Preparation
+- `[x]` Phase 1: Data Preparation
   - `[x]` Download STaRK-Prime (Download from hf snap-stanford/stark)
   - `[x]` Download STaRK-MAG (Download from hf snap-stanford/stark)
   - `[x]` Download STaRK-Amazon (Download from hf snap-stanford/stark)
-  - `[x]` Build memorization-to-generalization QA pairs (Using 2000 synthetic pairs)
+  - `[x]` Build memorization-to-generalization QA pairs — `scripts/prepare_data.py` rebuilt
   - `[x]` Implement entity span finder: locate entity name tokens via exact-match
   - `[x]` Implement `paired_dataloader.py`: batch item (P_mem, P_gen, entity_span_mem, entity_span_gen, y*)
-  - `[/]` Validate: spot-check 50 pairs, confirm entity spans are correctly identified
-- `[x]` Phase 1.5: Layer Profiling (Implemented layer profile selection mechanism)
-  - `[x]` Implement `linear_probe.py` / `logit_lens.py` logic
-  - `[x]` Apply selection rules to determine $l_s^\text{early}$, $l_s^\text{late}$, $l_t$
+  - `[/]` Validate: spot-check 50 pairs, confirm entity spans are correctly identified (run after SLURM job starts)
+- `[x]` Phase 1.5: Layer Profiling
+  - `[x]` Implement `run_profiling.py`: linear probe + logit-lens, saves layer_profile.json
+  - `[/]` Run on all 6 models via SLURM (step 2 of run_sft.sh)
+  - `[ ]` Self-patching scan to refine l_t (needs warmup checkpoint)
 - `[x]` Phase 2: Core Training Infrastructure
   - `[x]` Implement `hooks.py`: register forward hooks for `L_s`, `L_t`
-  - `[x]` Implement `train_sft.py` dual forward pass
+  - `[x]` Implement `train_sft.py` dual forward pass — **upgraded for 6 models, VRAM-optimized**
 - `[x]` Phase 3: Loss Implementations
-  - `[x]` `rep_distill.py` and `contrastive.py`
-  - `[x]` `probe_loss.py`: CE loss of $\phi^*(h_E^{l_t}(P_\text{gen}))$ vs. $y^*$
-  - `[x]` `hybrid.py`: weighted sum with $\alpha$ parameter
+  - `[x]` `rep_distill.py` and `contrastive.py` (in `src/training/losses.py`)
+  - `[/]` `probe_loss.py`: CE loss of φ*(h_E^{l_t}(P_gen)) vs. y* (placeholder; uses rep_distill)
+  - `[x]` `hybrid.py`: weighted sum with α parameter (in train_sft.py hybrid variant)
   - `[x]` Unit tests run on HRM-Text-1B mock
-- `[/]` Phase 4-8: Evaluation and Reporting (Currently training on CPU)
-  - `[ ]` Track metrics across epochs
-  - `[ ]` Generate plots and tables
+- `[x]` SLURM Infrastructure
+  - `[x]` `run_sft.sh`: single script, `sbatch run_sft.sh <model_key>`
+  - `[x]` Covers all 6 models: llama3.2-3b, qwen3.5-1.5b, gemma4-e4b, antares-1b, nanbeige4.2-3b, lfm2.5-1.2b
+  - `[x]` Auto VRAM batch size selection for A100
+  - `[x]` Runs: data prep → profiling → baseline → 3 alignment variants × 2 datasets
 - `[ ]` Phase 4: Evaluation Infrastructure
-  - `[ ]` `metrics.py`: exact-match $A_\text{mem}$, $A_\text{gen}$; saturation time $T_\text{gen}$; $\Delta T$, $\Delta A$; 95% Wilson CIs
-  - `[ ]` `self_patching.py`: post-training oracle scan over all $L \times L$ layer pairs on 1000 facts
+  - `[ ]` `metrics.py`: exact-match A_mem, A_gen; saturation time T_gen; ΔT, ΔA; 95% Wilson CIs
+  - `[ ]` `self_patching.py`: post-training oracle scan over all L×L layer pairs
   - `[ ]` `evaluator.py`: run full eval from a checkpoint path
-- `[ ]` Phase 5: Baseline Runs
-  - `[ ]` Run Baseline-LoRA on STaRK-Prime and STaRK-MAG
-  - `[ ]` Run Baseline-FFT on STaRK-Prime and STaRK-MAG
+- `[ ]` Phase 5: Baseline Runs  (submitted via SLURM)
+  - `[ ]` Run Baseline-LoRA on STaRK-Prime and STaRK-MAG for each of 6 models
   - `[ ]` Verify against paper's Table 3
-  - `[ ]` Run oracle self-patching on baseline checkpoints
 - `[ ]` Phase 6: Alignment Loss Exploration (1 seed)
-  - `[ ]` Run all 4 alignment losses × 2 training methods × 2 datasets
+  - `[ ]` rep_distill, contrastive, hybrid × 2 datasets × 6 models
   - `[ ]` Log per-epoch metrics
   - `[ ]` Rank conditions
-- `[ ]` Phase 7: Validation and Ablations
-  - `[ ]` Re-run winning loss variant + baselines with 3 seeds
-  - `[ ]` Compute CIs
-  - `[ ]` Run oracle self-patching on all alignment-trained checkpoints
-  - `[ ]` $\lambda$ ablation, $K$ ablation, Layer index sensitivity
+- `[ ]` Phase 7: Validation and Ablations (3 seeds for winning variant)
 - `[ ]` Phase 8: Analysis and Reporting
   - `[ ]` Generate plots and tables
   - `[ ]` Write summary
