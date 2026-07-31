@@ -215,8 +215,28 @@ def train(args):
 
     # ── Model ─────────────────────────────────────────────────────────────────
     print(f"Loading model: {args.model_id} ...")
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(args.model_id, cache_dir=args.hf_cache, trust_remote_code=True)
+    
+    # --- MONKEY PATCH FOR NANBEIGE ---
+    import transformers
+    if hasattr(transformers, "DynamicCache"):
+        if not hasattr(transformers.DynamicCache, "from_legacy_cache"):
+            transformers.DynamicCache.from_legacy_cache = lambda past_key_values: transformers.DynamicCache()
+        if not hasattr(transformers.DynamicCache, "to_legacy_cache"):
+            transformers.DynamicCache.to_legacy_cache = lambda self: ()
+    # ---------------------------------
+
+    if args.model_key and "nanbeige" in args.model_key.lower():
+        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
+            if "type" not in config.rope_scaling:
+                config.rope_scaling["type"] = "linear"
+            if "factor" not in config.rope_scaling:
+                config.rope_scaling["factor"] = 1.0
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
+        config=config,
         cache_dir=args.hf_cache,
         torch_dtype=dtype,
         device_map="cuda" if device.type == "cuda" else "cpu",

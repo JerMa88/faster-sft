@@ -245,8 +245,18 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(model_path, cache_dir=args.hf_cache, trust_remote_code=True)
+    if "nanbeige" in args.model_key.lower():
+        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
+            if "type" not in config.rope_scaling:
+                config.rope_scaling["type"] = "linear"
+            if "factor" not in config.rope_scaling:
+                config.rope_scaling["factor"] = 1.0
+
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
+        config=config,
         cache_dir=args.hf_cache,
         torch_dtype=dtype,
         device_map="cuda" if device.type == "cuda" else "cpu",
