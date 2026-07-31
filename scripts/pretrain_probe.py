@@ -227,6 +227,14 @@ def main():
 
     # ── Load model ─────────────────────────────────────────────────────────────
     model_path = args.checkpoint or model_id
+    print("="*60)
+
+    # --- MONKEY PATCH FOR NANBEIGE ---
+    import transformers
+    if hasattr(transformers, "DynamicCache") and not hasattr(transformers.DynamicCache, "from_legacy_cache"):
+        transformers.DynamicCache.from_legacy_cache = lambda past_key_values: transformers.DynamicCache()
+    # ---------------------------------
+
     print(f"  Loading model: {model_path} …")
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, cache_dir=args.hf_cache, trust_remote_code=True

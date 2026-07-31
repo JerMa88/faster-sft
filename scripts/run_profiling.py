@@ -350,6 +350,12 @@ def main():
     print(f"\nDevice: {device}  dtype: {dtype}")
 
     # ── Model ──────────────────────────────────────────────────────────────────
+    # --- MONKEY PATCH FOR NANBEIGE ---
+    import transformers
+    if hasattr(transformers, "DynamicCache") and not hasattr(transformers.DynamicCache, "from_legacy_cache"):
+        transformers.DynamicCache.from_legacy_cache = lambda past_key_values: transformers.DynamicCache()
+    # ---------------------------------
+
     print(f"Loading {args.model_id} for profiling …")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_id, cache_dir=args.hf_cache, trust_remote_code=True
