@@ -56,6 +56,11 @@ def parse_args():
     p.add_argument("--layer_profile", type=str,
                    default="data/processed/layer_profile.json",
                    help="Path to layer_profile.json from Phase 1.5")
+    p.add_argument("--probe_path", type=str, default=None,
+                   help="Path to probe_phi_<model_key>.pt (for probe/hybrid variants). "
+                        "Auto-detected from --model_key if not given.")
+    p.add_argument("--model_key", type=str, default=None,
+                   help="Short model key (e.g. qwen3.5-1.5b) for auto-finding probe file")
     p.add_argument("--out_dir", type=str, default="outputs/runs",
                    help="Directory for checkpoints and metrics")
     p.add_argument("--seed", type=int, default=42)
@@ -253,6 +258,42 @@ def train(args):
         batch_size = args.batch_size
     print(f"  Batch size : {batch_size}")
 
+    # ── Load φ* probe (for probe / hybrid variants) ───────────────────────────
+    phi_probe    = None
+    phi_probe_fn = None   # callable: h_gen (B,D) → loss scalar
+    if args.loss_variant in ("probe", "hybrid"):
+        # Auto-detect probe path from model_key
+        probe_path = args.probe_path
+        if probe_path is None and args.model_key:
+            probe_path = str(ROOT / "data" / "processed" /
+                             f"probe_phi_{args.model_key}.pt")
+        if probe_path and os.path.exists(probe_path):
+            ckpt = torch.load(probe_path, map_location=device)
+            hidden_size = ckpt["hidden_size"]
+            vocab_size  = ckpt["vocab_size"]
+            phi_probe = torch.nn.Linear(hidden_size, vocab_size, bias=True).to(device)
+            phi_probe.load_state_dict(ckpt["state_dict"])
+            phi_probe.eval()
+            for p in phi_probe.parameters():
+                p.requires_grad_(False)   # frozen
+            print(f"  φ* probe loaded: {probe_path} "
+                  f"(val_acc={ckpt.get('val_acc', 'N/A'):.3f})")
+
+            _probe_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+            def phi_probe_fn(h_gen_local, tgt_ids_local):
+                """CE loss through frozen φ* on first valid answer token."""
+                # h_gen_local: (B, D); tgt_ids_local: (B, max_entity_len)
+                h_norm = torch.nn.functional.normalize(h_gen_local.float(), dim=-1)
+                logits = phi_probe(h_norm)   # (B, vocab)
+                # label = first valid token per example
+                labels = tgt_ids_local[:, 0].to(device)  # (B,)
+                labels = labels.masked_fill(labels == -100, -100)
+                return _probe_loss_fn(logits, labels)
+        else:
+            print(f"  [WARN] φ* probe not found at '{probe_path}'. "
+                  f"Falling back to rep_distill for probe/hybrid variants. "
+                  f"Run: python scripts/pretrain_probe.py --model_key {args.model_key or '<key>'}")
+
     # Enable gradient checkpointing to save VRAM (trades compute for memory)
     if device.type == "cuda":
         model.gradient_checkpointing_enable()
@@ -340,23 +381,33 @@ def train(args):
 
             # ── Alignment loss ────────────────────────────────────────────────
             if align_active and h_gen is not None and h_mem_late is not None:
+                tgt_ids = batch["target_ids"]  # (B, max_entity_len)
                 if args.loss_variant == "rep_distill":
                     # Average RepDist over both source layers
                     align_loss  = rep_distill_loss(h_mem_early, h_gen) * 0.5
                     align_loss += rep_distill_loss(h_mem_late, h_gen)  * 0.5
                 elif args.loss_variant == "contrastive":
-                    # InfoNCE — average over both source layers
+                    # InfoNCE — average over both source layers, τ=0.07
                     align_loss  = contrastive_loss(h_mem_early, h_gen,
                                                    temperature=0.07) * 0.5
                     align_loss += contrastive_loss(h_mem_late, h_gen,
                                                    temperature=0.07) * 0.5
+                elif args.loss_variant == "probe":
+                    if phi_probe_fn is not None:
+                        align_loss = phi_probe_fn(h_gen, tgt_ids)
+                    else:
+                        align_loss = rep_distill_loss(h_mem_late, h_gen)  # fallback
                 elif args.loss_variant == "hybrid":
-                    rd_loss     = rep_distill_loss(h_mem_late, h_gen)
-                    ct_loss     = contrastive_loss(h_mem_late, h_gen, temperature=0.07)
-                    align_loss  = 0.5 * rd_loss + 0.5 * ct_loss
+                    # α·RepDist + (1-α)·ProbeLoss, α=0.5
+                    rd_loss = (rep_distill_loss(h_mem_early, h_gen) * 0.5
+                               + rep_distill_loss(h_mem_late, h_gen) * 0.5)
+                    if phi_probe_fn is not None:
+                        pl_loss = phi_probe_fn(h_gen, tgt_ids)
+                    else:
+                        pl_loss = contrastive_loss(h_mem_late, h_gen, temperature=0.07)
+                    align_loss = 0.5 * rd_loss + 0.5 * pl_loss
                 else:
-                    # probe variant needs pretrained probe — use rep_distill as stand-in
-                    align_loss = rep_distill_loss(h_mem_late, h_gen)
+                    align_loss = rep_distill_loss(h_mem_late, h_gen)  # safety fallback
 
                 total_loss = ce_loss + args.lambda_align * align_loss
                 epoch_align_loss += align_loss.item()

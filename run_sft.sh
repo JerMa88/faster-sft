@@ -38,6 +38,15 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MODEL_KEY="${1:-qwen3.5-1.5b}"   # first positional arg becomes the model key
 
+# Load HuggingFace token for gated models (llama3.2-3b, antares-1b).
+# Save your token once with: echo "hf_..." > ~/.hf_token && chmod 600 ~/.hf_token
+if [[ -f "${HOME}/.hf_token" ]]; then
+    export HF_TOKEN="$(cat "${HOME}/.hf_token")"
+    echo ">>> HF_TOKEN loaded from ~/.hf_token"
+elif [[ -z "${HF_TOKEN:-}" ]]; then
+    echo ">>> [WARN] HF_TOKEN not set — gated models (llama3.2-3b, antares-1b) will fail to download."
+fi
+
 WORK_DIR="/projects/mhahsler/course_recomm/allocation001/AI_Club/paper/faster-sft"
 PYTHON="/users/jerryma/.conda/envs/torch2.8/bin/python"
 HF_CACHE="${WORK_DIR}/hf_cache"
@@ -110,7 +119,7 @@ echo ""
 PROFILE_PATH="${WORK_DIR}/data/processed/layer_profile_${MODEL_KEY}.json"
 
 if [[ ! -f "${PROFILE_PATH}" ]]; then
-    echo ">>> [2/4] Running layer profiling for ${MODEL_KEY} …"
+    echo ">>> [2/5] Running layer profiling for ${MODEL_KEY} …"
     ${PYTHON} scripts/run_profiling.py \
         --model_id    "${MODEL_ID}" \
         --data_path   "${PRIME_DATA}" \
@@ -120,14 +129,35 @@ if [[ ! -f "${PROFILE_PATH}" ]]; then
         2>&1
     echo ">>> Layer profiling done at $(date)"
 else
-    echo ">>> [2/4] Layer profile for ${MODEL_KEY} already exists — skipping."
+    echo ">>> [2/5] Layer profile for ${MODEL_KEY} already exists — skipping."
+fi
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b. Pretrain φ* probe (needed for ProbeLoss and Hybrid variants)
+#     Run once per model on STaRK-Prime memorization set.
+# ─────────────────────────────────────────────────────────────────────────────
+PROBE_PATH="${WORK_DIR}/data/processed/probe_phi_${MODEL_KEY}.pt"
+
+if [[ ! -f "${PROBE_PATH}" ]]; then
+    echo ">>> [2b/5] Pretraining φ* probe for ${MODEL_KEY} …"
+    ${PYTHON} scripts/pretrain_probe.py \
+        --model_key   "${MODEL_KEY}" \
+        --data_path   "${PRIME_DATA}" \
+        --layer_profile "${PROFILE_PATH}" \
+        --probe_epochs 10 \
+        --hf_cache    "${HF_CACHE}" \
+        2>&1
+    echo ">>> φ* probe done at $(date)"
+else
+    echo ">>> [2b/5] φ* probe for ${MODEL_KEY} already exists — skipping."
 fi
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Baseline LoRA (no alignment loss) — STaRK-Prime and STaRK-MAG
 # ─────────────────────────────────────────────────────────────────────────────
-echo ">>> [3/4] Baseline LoRA runs …"
+echo ">>> [3/5] Baseline LoRA runs …"
 
 for DATASET in "prime" "mag"; do
     if [[ "${DATASET}" == "prime" ]]; then
@@ -139,6 +169,7 @@ for DATASET in "prime" "mag"; do
     echo "    >> Baseline LoRA — STaRK-${DATASET^^} …"
     ${PYTHON} scripts/train_sft.py \
         --model_id      "${MODEL_ID}" \
+        --model_key     "${MODEL_KEY}" \
         --data_path     "${DATA_FILE}" \
         --loss_variant  baseline \
         --epochs        50 \
@@ -159,12 +190,12 @@ echo ""
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Alignment-Aware LoRA — all 4 variants, both datasets
 # ─────────────────────────────────────────────────────────────────────────────
-echo ">>> [4/4] Alignment-aware LoRA sweep …"
+echo ">>> [4/5] Alignment-aware LoRA sweep …"
 
 LAMBDA=0.1
 WARMUP=3
 
-for LOSS_VARIANT in rep_distill contrastive hybrid; do
+for LOSS_VARIANT in rep_distill contrastive probe hybrid; do
     for DATASET in "prime" "mag"; do
         if [[ "${DATASET}" == "prime" ]]; then
             DATA_FILE="${PRIME_DATA}"
@@ -175,8 +206,10 @@ for LOSS_VARIANT in rep_distill contrastive hybrid; do
         echo "    >> ${LOSS_VARIANT} — STaRK-${DATASET^^} …"
         ${PYTHON} scripts/train_sft.py \
             --model_id      "${MODEL_ID}" \
+            --model_key     "${MODEL_KEY}" \
             --data_path     "${DATA_FILE}" \
             --loss_variant  "${LOSS_VARIANT}" \
+            --probe_path    "${PROBE_PATH}" \
             --epochs        50 \
             --lambda_align  "${LAMBDA}" \
             --warmup_epochs "${WARMUP}" \
@@ -193,6 +226,7 @@ for LOSS_VARIANT in rep_distill contrastive hybrid; do
 done
 
 echo ""
+
 echo "════════════════════════════════════════════════════════════════"
 echo "  ALL RUNS COMPLETE for ${MODEL_KEY}"
 echo "  Finished: $(date)"
