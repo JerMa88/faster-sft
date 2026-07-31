@@ -352,8 +352,11 @@ def main():
     # ── Model ──────────────────────────────────────────────────────────────────
     # --- MONKEY PATCH FOR NANBEIGE ---
     import transformers
-    if hasattr(transformers, "DynamicCache") and not hasattr(transformers.DynamicCache, "from_legacy_cache"):
-        transformers.DynamicCache.from_legacy_cache = lambda past_key_values: transformers.DynamicCache()
+    if hasattr(transformers, "DynamicCache"):
+        if not hasattr(transformers.DynamicCache, "from_legacy_cache"):
+            transformers.DynamicCache.from_legacy_cache = lambda past_key_values: transformers.DynamicCache()
+        if not hasattr(transformers.DynamicCache, "to_legacy_cache"):
+            transformers.DynamicCache.to_legacy_cache = lambda self: ()
     # ---------------------------------
 
     print(f"Loading {args.model_id} for profiling …")
