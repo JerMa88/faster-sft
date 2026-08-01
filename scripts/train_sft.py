@@ -78,22 +78,33 @@ def parse_args():
 def auto_batch_size(device: torch.device, model_param_bytes: int, vocab_size: int = 32000) -> int:
     """
     VRAM-aware batch size selection targeting ~55-65 GB VRAM on 80 GB GPUs.
-    Considers activation memory (dual forward pass) and vocabulary-dependent 
-    cross-entropy logit allocation (4096 * vocab_size bytes per batch item).
+    Considers activation memory (dual forward pass), gradient memory,
+    and vocabulary-dependent cross-entropy logit allocation.
     """
     if device.type != "cuda":
         return 4
     total_vram = torch.cuda.get_device_properties(device).total_memory / 1e9  # GB
     weight_gb  = model_param_bytes / 1e9
-    # Reserve 18 GB safety margin for PyTorch allocator overhead and peak activation workspace
+    # Gradient memory: LoRA gradients are small but optimizer states + 
+    # gradient checkpointing workspace need ~weight_gb * 0.3 extra
+    grad_gb = weight_gb * 0.3
+    # Reserve 18 GB safety margin for PyTorch allocator overhead
     target_vram = max(20.0, total_vram - 18.0)
-    avail_gb   = max(5.0, target_vram - weight_gb)
+    avail_gb   = max(5.0, target_vram - weight_gb - grad_gb)
     
-    # Activation memory per batch item (~0.35 GB) + Logit/CE memory per batch item (8 * 512 * V bytes)
-    item_mem_gb = 0.35 + (8.0 * 512.0 * vocab_size / 1e9)
+    # Activation memory per batch item scales with model size + vocab
+    # Base activation: ~0.35 GB for 1-3B models, scales linearly with params
+    base_act_gb = 0.35 * max(1.0, weight_gb / 4.0)  # scale relative to 2B model (~4GB)
+    # Logit/CE memory per batch item (8 * seq_len * V bytes)
+    logit_gb = 8.0 * 512.0 * vocab_size / 1e9
+    item_mem_gb = base_act_gb + logit_gb
+    
     est_batch = int(avail_gb / item_mem_gb)
-    # Cap at 32 for optimal compute speed & high VRAM utilization across all models
+    # Cap at 32 for optimal compute speed & high VRAM utilization
     batch_size = max(2, min(est_batch, 32))
+    print(f"  Auto batch: VRAM={total_vram:.0f}GB, weights={weight_gb:.1f}GB, "
+          f"grad={grad_gb:.1f}GB, avail={avail_gb:.1f}GB, "
+          f"item_mem={item_mem_gb:.2f}GB → batch={batch_size}")
     return batch_size
 
 # ─────────────────────────────────────────────────────────────────────────────
