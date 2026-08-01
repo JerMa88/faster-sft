@@ -74,13 +74,22 @@ def _load_model(
             transformers.DynamicCache.to_legacy_cache = lambda self: ()
     # ---------------------------------
 
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(base_model_id if is_peft else str(ckpt), cache_dir=hf_cache, trust_remote_code=True)
+    if "nanbeige" in base_model_id.lower() or "nanbeige" in str(ckpt).lower():
+        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
+            if "type" not in config.rope_scaling:
+                config.rope_scaling["type"] = "linear"
+            if "factor" not in config.rope_scaling:
+                config.rope_scaling["factor"] = 1.0
+
     if is_peft:
         try:
             from peft import PeftModel
         except ImportError:
             raise ImportError("peft not installed — cannot load LoRA checkpoint.")
         base = AutoModelForCausalLM.from_pretrained(
-            base_model_id, cache_dir=hf_cache,
+            base_model_id, config=config, cache_dir=hf_cache,
             torch_dtype=dtype,
             device_map="cuda" if device.type == "cuda" else "cpu",
             trust_remote_code=True,
@@ -88,7 +97,7 @@ def _load_model(
         model = PeftModel.from_pretrained(base, str(ckpt))
     else:
         model = AutoModelForCausalLM.from_pretrained(
-            str(ckpt), cache_dir=hf_cache,
+            str(ckpt), config=config, cache_dir=hf_cache,
             torch_dtype=dtype,
             device_map="cuda" if device.type == "cuda" else "cpu",
             trust_remote_code=True,
