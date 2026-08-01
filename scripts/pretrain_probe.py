@@ -44,8 +44,9 @@ from src.data.paired_dataloader import get_dataloader
 # ── Model key → HF ID map (mirrors run_sft.sh) ───────────────────────────────
 MODEL_IDS = {
     "llama3.2-3b":    "meta-llama/Llama-3.2-3B-Instruct",
-    "qwen3.5-2b":   "Qwen/Qwen3.5-2B",
-    "gemma2-2b":       "google/gemma-2-2b-it",
+    "qwen3.5-2b":     "Qwen/Qwen3.5-2B",
+    "gemma2-2b":      "google/gemma-2-2b-it",
+    "gemma4-e4b":     "google/gemma-4-E4B-it",
     "antares-1b":     "fdtn-ai/antares-1b",
     "nanbeige4.2-3b": "Nanbeige/Nanbeige4.2-3B",
     "lfm2.5-1.2b":    "LiquidAI/LFM2.5-1.2B-Base",
@@ -56,6 +57,15 @@ def count_layers(model) -> int:
     base = model
     if hasattr(base, "base_model"):
         base = base.base_model.model
+    # Gemma4 multimodal: model.model.language_model.layers
+    if hasattr(base, "language_model"):
+        lm = base.language_model
+        if hasattr(lm, "layers"):
+            return len(lm.layers)
+    if hasattr(base, "model") and hasattr(base.model, "language_model"):
+        lm = base.model.language_model
+        if hasattr(lm, "layers"):
+            return len(lm.layers)
     if hasattr(base, "model") and hasattr(base.model, "layers"):
         return len(base.model.layers)
     if hasattr(base, "layers"):
