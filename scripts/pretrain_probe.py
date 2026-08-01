@@ -278,8 +278,13 @@ def main():
         l_s_late = max(1, int(0.85 * L))
         print(f"  Heuristic l_s_late={l_s_late} for L={L}")
 
-    vocab_size = model.config.vocab_size
-    print(f"  vocab_size={vocab_size}  hidden_size={model.config.hidden_size}")
+    # Gemma4 multimodal config nests text attributes under text_config
+    cfg = model.config
+    if hasattr(cfg, "text_config"):
+        cfg = cfg.text_config
+    vocab_size  = cfg.vocab_size
+    hidden_size = cfg.hidden_size
+    print(f"  vocab_size={vocab_size}  hidden_size={hidden_size}")
 
     # ── Collect representations ────────────────────────────────────────────────
     print(f"\n  Collecting h_E^{{l_s_late={l_s_late}}} for all P_mem examples …")
