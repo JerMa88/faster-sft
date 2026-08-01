@@ -180,6 +180,16 @@ def get_lora_target_modules(model_id: str) -> list[str]:
     mid = model_id.lower()
     if "llama" in mid or "qwen" in mid or "nanbeige" in mid:
         return ["q_proj", "v_proj", "o_proj", "k_proj"]
+    if "gemma-4" in mid or "gemma4" in mid:
+        # Gemma4 multimodal: vision tower uses Gemma4ClippableLinear for
+        # q/k/v_proj which PEFT can't handle. Target ONLY the text decoder
+        # layers via regex matching the language_model path.
+        return [
+            r"language_model\.layers\.\d+\.self_attn\.q_proj",
+            r"language_model\.layers\.\d+\.self_attn\.k_proj",
+            r"language_model\.layers\.\d+\.self_attn\.v_proj",
+            r"language_model\.layers\.\d+\.self_attn\.o_proj",
+        ]
     if "gemma" in mid:
         return ["q_proj", "v_proj", "o_proj", "k_proj"]
     if "antares" in mid or "granite" in mid:
