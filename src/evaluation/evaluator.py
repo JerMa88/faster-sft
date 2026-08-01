@@ -13,8 +13,8 @@ Usage (standalone):
 
 Design:
   - Each training run saves checkpoints at epochs {1, 3, 5, 10, 15, 20, 30, 50}
-  - Evaluator loads them in order, runs greedy first-token prediction,
-    records A_mem and A_gen, then writes one JSON summary per run.
+  - Evaluator loads the checkpoint, uses model.generate() to produce
+    multi-token answers, then compares via string_exact_match.
   - Works with both base models and PEFT/LoRA adapters (auto-detected).
 """
 
@@ -36,10 +36,8 @@ os.environ.setdefault("TRANSFORMERS_CACHE",  HF_CACHE)
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.data.paired_dataloader import get_dataloader
 from src.evaluation.metrics import (
-    memorization_accuracy, generalization_accuracy,
-    convergence_epoch, auc_curve, compute_all_metrics,
+    string_accuracy, convergence_epoch, auc_curve,
 )
 
 
@@ -66,6 +64,15 @@ def _load_model(
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    # --- MONKEY PATCH FOR NANBEIGE ---
+    import transformers
+    if hasattr(transformers, "DynamicCache"):
+        if not hasattr(transformers.DynamicCache, "from_legacy_cache"):
+            transformers.DynamicCache.from_legacy_cache = lambda past_key_values: transformers.DynamicCache()
+        if not hasattr(transformers.DynamicCache, "to_legacy_cache"):
+            transformers.DynamicCache.to_legacy_cache = lambda self: ()
+    # ---------------------------------
 
     if is_peft:
         try:
@@ -94,38 +101,111 @@ def _load_model(
     return model, tokenizer
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Generation-based evaluation (fixes the BPE token mismatch bug)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ANSWER_MARKER = "Answer:"
+
 @torch.no_grad()
-def _run_inference(
+def _run_generative_eval(
     model,
-    loader,
-    device: torch.device,
-    dtype:  torch.dtype,
-    kind:   str = "gen",   # "mem" or "gen"
-) -> tuple[list[int], list[int]]:
+    tokenizer,
+    data_path:    str,
+    device:       torch.device,
+    dtype:        torch.dtype,
+    kind:         str = "gen",   # "mem" or "gen"
+    max_new_tokens: int = 32,
+    batch_size:   int = 16,
+) -> tuple[list[str], list[str]]:
     """
-    Greedy first-token decoding on all examples in loader.
-    Returns (predictions, targets) both as lists of token IDs.
+    Multi-token generative evaluation.
+
+    For each example:
+    1. Construct the prompt (P_mem or P_gen) up to "Answer: " (exclusive of entity)
+    2. Use model.generate() to produce the answer
+    3. Decode generated tokens → string
+    4. Compare against target_entity string
+
+    Returns (predictions, targets) both as lists of strings.
     """
-    id_key   = f"{kind}_input_ids"
-    span_key = f"{kind}_span"
+    import json as _json
+
+    # Read raw data
+    data = []
+    with open(data_path, 'r') as f:
+        for line in f:
+            data.append(_json.loads(line))
 
     all_preds   = []
     all_targets = []
 
-    for batch in loader:
-        input_ids = batch[id_key].to(device)
-        tgt_ids   = batch["target_ids"]     # (B, max_entity_len)
+    # Process in batches
+    for batch_start in range(0, len(data), batch_size):
+        batch_items = data[batch_start : batch_start + batch_size]
 
-        with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
-            logits = model(input_ids).logits  # (B, seq, vocab)
+        prompts  = []
+        targets  = []
+        for item in batch_items:
+            target_entity = item["target_entity"]
+            targets.append(target_entity)
 
-        preds = logits[:, -1, :].argmax(dim=-1).cpu()  # (B,)
+            if kind == "mem":
+                # P_mem: "Context: {doc}\nQuery: What entity is this about?\nAnswer: "
+                full_text = f"Context: {item['document']}\nQuery: What entity is this about?\nAnswer: "
+            else:
+                # P_gen: "Query: {query}\nAnswer: "
+                full_text = f"Query: {item['query']}\nAnswer: "
 
-        for b in range(tgt_ids.size(0)):
-            valid = tgt_ids[b][tgt_ids[b] != -100]
-            target = valid[0].item() if len(valid) > 0 else -1
-            all_targets.append(target)
-            all_preds.append(preds[b].item())
+            prompts.append(full_text)
+
+        # Tokenize prompts (left-pad for generation)
+        tokenizer.padding_side = "left"
+        encodings = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=480,  # leave room for generation
+        ).to(device)
+
+        # Try model.generate() first; fall back to manual loop for
+        # architectures whose KV cache doesn't support it (e.g. Granite
+        # hybrid attention, LFM state-space hybrid).
+        try:
+            with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
+                gen_ids = model.generate(
+                    **encodings,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    num_beams=1,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+        except Exception as gen_err:
+            # Fallback: manual autoregressive generation via forward pass
+            input_ids = encodings["input_ids"]
+            attn_mask = encodings["attention_mask"]
+            generated = input_ids.clone()
+
+            for _ in range(max_new_tokens):
+                with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
+                    outputs = model(input_ids=generated, attention_mask=attn_mask)
+                next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                generated = torch.cat([generated, next_token], dim=1)
+                attn_mask = torch.cat([attn_mask, torch.ones_like(next_token)], dim=1)
+                # Stop if all sequences produced EOS
+                if (next_token.squeeze(-1) == tokenizer.eos_token_id).all():
+                    break
+
+            gen_ids = generated
+
+        # Extract only the generated tokens (after the prompt)
+        prompt_len = encodings["input_ids"].shape[1]
+        for b_idx in range(len(batch_items)):
+            generated_tokens = gen_ids[b_idx, prompt_len:]
+            pred_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            all_preds.append(pred_text)
+            all_targets.append(targets[b_idx])
 
     return all_preds, all_targets
 
@@ -145,7 +225,8 @@ def evaluate_checkpoint(
     verbose:         bool = True,
 ) -> dict:
     """
-    Evaluate a single checkpoint. Returns metrics dict with A_mem and A_gen.
+    Evaluate a single checkpoint using multi-token generation + string match.
+    Returns metrics dict with A_mem and A_gen.
     """
     if verbose:
         print(f"  Evaluating: {Path(checkpoint_path).name} …")
@@ -153,16 +234,27 @@ def evaluate_checkpoint(
     model, tokenizer = _load_model(
         checkpoint_path, base_model_id, device, dtype, hf_cache
     )
-    loader = get_dataloader(data_path, tokenizer, batch_size=batch_size, shuffle=False)
 
-    mem_preds, mem_targets = _run_inference(model, loader, device, dtype, kind="mem")
-    gen_preds, gen_targets = _run_inference(model, loader, device, dtype, kind="gen")
+    # Generative evaluation
+    mem_preds, mem_targets = _run_generative_eval(
+        model, tokenizer, data_path, device, dtype,
+        kind="mem", batch_size=batch_size,
+    )
+    gen_preds, gen_targets = _run_generative_eval(
+        model, tokenizer, data_path, device, dtype,
+        kind="gen", batch_size=batch_size,
+    )
 
-    a_mem = memorization_accuracy(mem_preds, mem_targets)
-    a_gen = generalization_accuracy(gen_preds, gen_targets)
+    a_mem = string_accuracy(mem_preds, mem_targets)
+    a_gen = string_accuracy(gen_preds, gen_targets)
 
     if verbose:
         print(f"    A_mem={a_mem:.3f}  A_gen={a_gen:.3f}")
+        # Print a few examples for spot-checking
+        for i in range(min(3, len(mem_preds))):
+            match_sym = "✓" if a_mem > 0 else "✗"
+            print(f"      [{match_sym}] pred='{mem_preds[i][:50]}' "
+                  f"target='{mem_targets[i][:50]}'")
 
     # Free GPU memory
     del model

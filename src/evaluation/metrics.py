@@ -20,7 +20,67 @@ import numpy as np
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core accuracy metrics
+# String-level exact match (fixes BPE token ID mismatch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_answer(s: str) -> str:
+    """Normalize an answer string: strip, lowercase, collapse whitespace."""
+    import re
+    s = s.strip().lower()
+    s = re.sub(r'\s+', ' ', s)
+    # Remove trailing punctuation that models sometimes add
+    s = re.sub(r'[.\n]+$', '', s)
+    # Strip markdown bold markers
+    s = s.replace('**', '')
+    # Strip common conversational prefixes
+    for prefix in [
+        'this paper is about ',
+        'the answer is ',
+        'answer: ',
+    ]:
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+    return s.strip()
+
+
+def string_exact_match(predicted: str, target: str) -> bool:
+    """
+    Case-insensitive, whitespace-normalized exact match.
+    Handles the BPE token mismatch where tokenizer("small") != tokenizer(" small").
+    Also checks if the target appears as a prefix of the prediction (the model
+    may generate extra tokens after the entity name), or if the target is
+    contained as a substring (for models that prepend IDs or conversational text).
+    """
+    pred_norm = normalize_answer(predicted)
+    tgt_norm  = normalize_answer(target)
+    # Direct match or prediction starts with target
+    if pred_norm == tgt_norm or pred_norm.startswith(tgt_norm):
+        return True
+    # Target contained in prediction (for predictions like "1406577: entity name...")
+    if tgt_norm in pred_norm:
+        return True
+    return False
+
+
+def string_accuracy(predictions: list[str], targets: list[str]) -> float:
+    """
+    Fraction of predictions matching targets via string_exact_match.
+    Returns 0.0 if sequences are empty.
+    """
+    if len(predictions) == 0:
+        return 0.0
+    if len(predictions) != len(targets):
+        raise ValueError(
+            f"predictions and targets must have same length, "
+            f"got {len(predictions)} vs {len(targets)}"
+        )
+    matches = sum(1 for p, t in zip(predictions, targets)
+                  if string_exact_match(p, t))
+    return float(matches / len(predictions))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core accuracy metrics (token-level — kept for backward compat)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def accuracy(predictions: Sequence[int], targets: Sequence[int]) -> float:
