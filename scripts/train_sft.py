@@ -104,12 +104,13 @@ def auto_batch_size(device: torch.device, model_param_bytes: int, vocab_size: in
 # These are used when layer_profile.json has not been produced yet.
 # Format: model_family_key -> (l_s_early, l_s_late, l_t)
 LAYER_DEFAULTS = {
-    # Qwen3.5-2B (estimated layers)
+    # Qwen3.5-2B: 28 layers
     "qwen3.5-2b": (4, 24, 13),
     # Llama-3.2-3B: 28 layers
     "llama-3.2-3b":  (4, 24, 13),
-    # Gemma-4-E4B: 34 layers
-    "gemma-4-e4b":   (5, 29, 16),
+    # Gemma-4-E4B: 42 text layers (sliding + full attention)
+    "gemma-4-e4b":   (6, 36, 20),
+    "gemma4-e4b":    (6, 36, 20),
     # Antares-1B (Granite-based): 24 layers
     "antares-1b":    (3, 20, 11),
     # Nanbeige4.2-3B: Looped Transformer, 32 effective layers
@@ -148,6 +149,21 @@ def detect_layer_count(model) -> int:
     base = model
     if hasattr(base, "base_model"):
         base = base.base_model.model
+    # Gemma4 multimodal: text layers are under language_model.layers
+    if hasattr(base, "language_model"):
+        lm = base.language_model
+        if hasattr(lm, "layers"):
+            return len(lm.layers)
+        if hasattr(lm, "model") and hasattr(lm.model, "layers"):
+            return len(lm.model.layers)
+    # Gemma4 also via model.model.language_model
+    if hasattr(base, "model") and hasattr(base.model, "language_model"):
+        lm = base.model.language_model
+        if hasattr(lm, "layers"):
+            return len(lm.layers)
+        if hasattr(lm, "model") and hasattr(lm.model, "layers"):
+            return len(lm.model.layers)
+    # Standard: ForCausalLM → .model → .layers
     if hasattr(base, "model") and hasattr(base.model, "layers"):
         return len(base.model.layers)
     if hasattr(base, "layers"):

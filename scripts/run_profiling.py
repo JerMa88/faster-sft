@@ -54,6 +54,20 @@ def count_layers(model) -> int:
     base = model
     if hasattr(base, "peft_config"):          # PeftModel
         base = base.base_model.model
+    # Gemma4 multimodal: text layers are under model.language_model.layers
+    if hasattr(base, "language_model"):
+        lm = base.language_model
+        if hasattr(lm, "layers"):
+            return len(lm.layers)
+        if hasattr(lm, "model") and hasattr(lm.model, "layers"):
+            return len(lm.model.layers)
+    # Gemma4 via model.model.language_model.layers
+    if hasattr(base, "model") and hasattr(base.model, "language_model"):
+        lm = base.model.language_model
+        if hasattr(lm, "layers"):
+            return len(lm.layers)
+        if hasattr(lm, "model") and hasattr(lm.model, "layers"):
+            return len(lm.model.layers)
     # Standard: ForCausalLM → .model → .layers
     if hasattr(base, "model") and hasattr(base.model, "layers"):
         return len(base.model.layers)

@@ -145,7 +145,32 @@ def _get_layer(model: nn.Module, layer_idx: int) -> nn.Module:
         else:
             return base.model.H_module.layers[layer_idx - 16]
 
-    # Standard: model.model.layers  (covers all 6 active models)
+    # Gemma4 multimodal: text layers under language_model.layers
+    if hasattr(base, "language_model"):
+        lm = base.language_model
+        layers_obj = getattr(lm, "layers", None) or \
+                     (getattr(getattr(lm, "model", None), "layers", None))
+        if layers_obj is not None:
+            if layer_idx < 0 or layer_idx >= len(layers_obj):
+                raise IndexError(
+                    f"Layer index {layer_idx} out of range for Gemma4 model with "
+                    f"{len(layers_obj)} text layers."
+                )
+            return layers_obj[layer_idx]
+    # Gemma4 also via model.model.language_model
+    if hasattr(base, "model") and hasattr(base.model, "language_model"):
+        lm = base.model.language_model
+        layers_obj = getattr(lm, "layers", None) or \
+                     (getattr(getattr(lm, "model", None), "layers", None))
+        if layers_obj is not None:
+            if layer_idx < 0 or layer_idx >= len(layers_obj):
+                raise IndexError(
+                    f"Layer index {layer_idx} out of range for Gemma4 model with "
+                    f"{len(layers_obj)} text layers."
+                )
+            return layers_obj[layer_idx]
+
+    # Standard: model.model.layers  (covers Llama, Qwen, Antares, Nanbeige, LFM2.5)
     if hasattr(base, "model") and hasattr(base.model, "layers"):
         layers = base.model.layers
         if layer_idx < 0 or layer_idx >= len(layers):
