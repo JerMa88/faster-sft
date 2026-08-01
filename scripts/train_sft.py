@@ -180,25 +180,43 @@ def get_lora_target_modules(model_id: str) -> list[str]:
     mid = model_id.lower()
     if "llama" in mid or "qwen" in mid or "nanbeige" in mid:
         return ["q_proj", "v_proj", "o_proj", "k_proj"]
-    if "gemma-4" in mid or "gemma4" in mid:
-        # Gemma4 multimodal: vision tower uses Gemma4ClippableLinear for
-        # q/k/v_proj which PEFT can't handle. Target ONLY the text decoder
-        # layers via regex matching the language_model path.
-        return [
-            r"language_model\.layers\.\d+\.self_attn\.q_proj",
-            r"language_model\.layers\.\d+\.self_attn\.k_proj",
-            r"language_model\.layers\.\d+\.self_attn\.v_proj",
-            r"language_model\.layers\.\d+\.self_attn\.o_proj",
-        ]
     if "gemma" in mid:
+        # Both Gemma2 and Gemma4 use standard q/k/v/o_proj names.
+        # For Gemma4 multimodal, we also need exclude_modules to skip
+        # the vision tower's ClippableLinear — handled in get_peft_config.
         return ["q_proj", "v_proj", "o_proj", "k_proj"]
     if "antares" in mid or "granite" in mid:
         return ["q_proj", "v_proj", "o_proj"]
     if "lfm" in mid or "liquid" in mid:
-        # LFM uses attention-like projections
         return ["q_proj", "v_proj", "o_proj"]
     # Fallback
     return ["q_proj", "v_proj", "o_proj"]
+
+
+def get_peft_config(model_id: str, model, lora_rank: int) -> LoraConfig:
+    """Build LoRA config, handling Gemma4's multimodal vision tower."""
+    target_modules = get_lora_target_modules(model_id)
+    mid = model_id.lower()
+    
+    kwargs = dict(
+        task_type=TaskType.CAUSAL_LM,
+        r=lora_rank,
+        lora_alpha=lora_rank * 2,
+        target_modules=target_modules,
+        lora_dropout=0.05,
+        bias="none",
+    )
+    
+    if "gemma-4" in mid or "gemma4" in mid:
+        # Gemma4 multimodal: restrict LoRA to the text decoder layers ONLY
+        # to avoid hitting vision tower's Gemma4ClippableLinear.
+        # Find the number of text layers and set layers_to_transform.
+        n_text_layers = detect_layer_count(model)
+        kwargs["layers_to_transform"] = list(range(n_text_layers))
+        kwargs["layers_pattern"] = "language_model.layers"
+        print(f"  [Gemma4] Restricting LoRA to {n_text_layers} text decoder layers")
+    
+    return LoraConfig(**kwargs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,15 +294,7 @@ def train(args):
     )
 
     # ── LoRA ──────────────────────────────────────────────────────────────────
-    target_modules = get_lora_target_modules(args.model_id)
-    peft_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=args.lora_rank,
-        lora_alpha=args.lora_rank * 2,      # standard: alpha = 2r
-        target_modules=target_modules,
-        lora_dropout=0.05,
-        bias="none",
-    )
+    peft_config = get_peft_config(args.model_id, model, args.lora_rank)
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
