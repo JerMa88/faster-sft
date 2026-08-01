@@ -147,8 +147,13 @@ def resolve_layer_indices(model_id: str, profile_path: str):
 def detect_layer_count(model) -> int:
     """Count decoder layers in a loaded model (handles PeftModel wrapper)."""
     base = model
-    if hasattr(base, "base_model"):
-        base = base.base_model.model
+    # Unwrap PeftModel specifically (not PreTrainedModel.base_model property)
+    try:
+        from peft import PeftModel
+        if isinstance(base, PeftModel):
+            base = base.base_model.model
+    except ImportError:
+        pass
     # Gemma4 multimodal: text layers are under language_model.layers
     if hasattr(base, "language_model"):
         lm = base.language_model
