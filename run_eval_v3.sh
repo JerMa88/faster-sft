@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=eval_v3_align
+#SBATCH --account=mhahsler_course_recomm_0001
 #SBATCH --partition=batch
 #SBATCH --nodes=1
-#SBATCH --gpus=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
 #SBATCH --time=08:00:00
 #SBATCH --mem=64G
 #SBATCH --output=outputs/logs/eval_v3_align_%j.out
