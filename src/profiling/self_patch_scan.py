@@ -466,13 +466,26 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint,
-        cache_dir=args.hf_cache,
-        torch_dtype=dtype,
-        device_map="cuda" if device.type == "cuda" else "cpu",
-        trust_remote_code=True,
-    )
+    ckpt = Path(args.checkpoint)
+    is_peft = (ckpt / "adapter_config.json").exists()
+    if is_peft:
+        from peft import PeftModel
+        base = AutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            cache_dir=args.hf_cache,
+            torch_dtype=dtype,
+            device_map="cuda" if device.type == "cuda" else "cpu",
+            trust_remote_code=True,
+        )
+        model = PeftModel.from_pretrained(base, str(ckpt))
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            str(ckpt),
+            cache_dir=args.hf_cache,
+            torch_dtype=dtype,
+            device_map="cuda" if device.type == "cuda" else "cpu",
+            trust_remote_code=True,
+        )
     model.eval()
     L = count_layers(model)
     print(f"Model layers L={L}")
