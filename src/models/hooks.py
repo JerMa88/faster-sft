@@ -59,7 +59,7 @@ class RepresentationCache:
 def get_layer_hook(
     layer_idx:    int,
     cache:        RepresentationCache,
-    entity_spans: Optional[List[Tuple[int, int]]] = None,
+    entity_spans: Optional[Union[List[Tuple[int, int]], Dict[str, List[Tuple[int, int]]]]] = None,
 ):
     """
     Returns a forward hook that extracts hidden states at the given layer.
@@ -70,6 +70,7 @@ def get_layer_hook(
         entity_spans : list of (start, end) tuples per batch item.
                        If None, caches the full sequence (B, seq_len, D).
                        If provided, caches mean-pooled entity rep (B, D).
+                       If dictionary, caches a dictionary of reps under layer_idx.
     """
     def hook(module: nn.Module, inputs: tuple, outputs):
         # Normalise output: extract hidden states tensor regardless of format
@@ -80,7 +81,8 @@ def get_layer_hook(
 
         # Handle rare 2-D hidden states (some custom layers)
         if hidden_states.dim() == 2 and entity_spans is not None:
-            batch_size = len(entity_spans)
+            # We assume batch_size is determinable from spans length
+            batch_size = len(list(entity_spans.values())[0]) if isinstance(entity_spans, dict) else len(entity_spans)
             seq_len    = hidden_states.size(0) // batch_size
             hidden_states = hidden_states.view(batch_size, seq_len, -1)
 
@@ -89,6 +91,31 @@ def get_layer_hook(
             stored = hidden_states if hidden_states.requires_grad \
                      else hidden_states.detach()
             cache.cache[layer_idx] = stored
+        elif isinstance(entity_spans, dict):
+            # Extract multiple named spans
+            batch_size = hidden_states.size(0)
+            layer_cache = {}
+            for key, spans in entity_spans.items():
+                entity_reps = []
+                for i in range(min(batch_size, len(spans))):
+                    span = spans[i]
+                    if isinstance(span, (tuple, list)) and len(span) == 2:
+                        start, end = int(span[0]), int(span[1])
+                        # Handle missing/invalid spans gracefully
+                        if start == -1 and end == -1:
+                            start, end = 0, 1 # fallback to first token
+                        start = max(0, min(start, hidden_states.size(1) - 1))
+                        end   = max(start + 1, min(end, hidden_states.size(1)))
+                        span_states = hidden_states[i, start:end, :]
+                    else:
+                        # Legacy explicit token indices
+                        indices = torch.tensor(span, dtype=torch.long, device=hidden_states.device)
+                        indices = indices.clamp(0, hidden_states.size(1) - 1)
+                        span_states = hidden_states[i, indices, :]
+                    mean_pooled = span_states.mean(dim=0)
+                    entity_reps.append(mean_pooled)
+                layer_cache[key] = torch.stack(entity_reps)
+            cache.cache[layer_idx] = layer_cache
         else:
             batch_size  = hidden_states.size(0)
             entity_reps = []
@@ -96,7 +123,8 @@ def get_layer_hook(
                 span = entity_spans[i]
                 if isinstance(span, (tuple, list)) and len(span) == 2:
                     start, end = int(span[0]), int(span[1])
-                    # Clamp to valid range
+                    if start == -1 and end == -1:
+                        start, end = 0, 1 # fallback to first token
                     start = max(0, min(start, hidden_states.size(1) - 1))
                     end   = max(start + 1, min(end, hidden_states.size(1)))
                     span_states = hidden_states[i, start:end, :]
@@ -204,7 +232,7 @@ def register_hooks(
     model:        nn.Module,
     layer_indices: List[int],
     cache:        RepresentationCache,
-    entity_spans: Optional[List[Tuple[int, int]]] = None,
+    entity_spans: Optional[Union[List[Tuple[int, int]], Dict[str, List[Tuple[int, int]]]]] = None,
 ) -> List[torch.utils.hooks.RemovableHandle]:
     """
     Register forward hooks on the specified decoder layers.
