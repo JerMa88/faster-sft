@@ -419,24 +419,37 @@ def train(args):
             mem_span = batch["mem_span"]
             gen_span = batch["gen_span"]
 
+            # ── Fix 2: DynLayerAlign (Dynamic Knowledge Permeation) ───────────
+            # Linearly interpolate l_t from l_s_early to l_s_late across epochs
+            current_l_t = int(l_s_early + (l_s_late - l_s_early) * (epoch / args.epochs))
+            
             # ── Pass 1: P_mem → h_mem at l_s_early and l_s_late (no grad) ──
             rep_cache.clear()
-            mem_spans_list = [(int(s[0]), int(s[1])) for s in mem_span]
+            mem_spans_dict = {
+                "target": [(int(s[0]), int(s[1])) for s in mem_span],
+                "bridge": [(int(s[0]), int(s[1])) for s in batch["mem_bridge_span"]]
+            }
             handles_mem = register_hooks(
-                model, [l_s_early, l_s_late], rep_cache, mem_spans_list
+                model, [l_s_early, l_s_late], rep_cache, mem_spans_dict
             )
             with torch.no_grad():
                 model(mem_ids)
             for h in handles_mem:
                 h.remove()
-            h_mem_early = rep_cache.cache.get(l_s_early)  # (B, D) or None
-            h_mem_late  = rep_cache.cache.get(l_s_late)
+            h_mem_early = rep_cache.cache.get(l_s_early, {}).get("target")
+            h_mem_late  = rep_cache.cache.get(l_s_late, {}).get("target")
+            
+            h_mem_bridge_early = rep_cache.cache.get(l_s_early, {}).get("bridge")
+            h_mem_bridge_late  = rep_cache.cache.get(l_s_late, {}).get("bridge")
 
-            # ── Pass 2: P_gen → CE loss + h_gen at l_t ───────────────────────
+            # ── Pass 2: P_gen → CE loss + h_gen at current_l_t ───────────────
             rep_cache.clear()
-            gen_spans_list = [(int(s[0]), int(s[1])) for s in gen_span]
+            gen_spans_dict = {
+                "target": [(int(s[0]), int(s[1])) for s in gen_span],
+                "bridge": [(int(s[0]), int(s[1])) for s in batch["gen_bridge_span"]]
+            }
             handles_gen = register_hooks(
-                model, [l_t], rep_cache, gen_spans_list
+                model, [current_l_t], rep_cache, gen_spans_dict
             )
 
             # Mask labels: only supervise the answer portion (after query prompt)
@@ -458,15 +471,33 @@ def train(args):
 
             for h in handles_gen:
                 h.remove()
-            h_gen = rep_cache.cache.get(l_t)  # (B, D)
+            h_gen = rep_cache.cache.get(current_l_t, {}).get("target")  # (B, D)
+            h_gen_bridge = rep_cache.cache.get(current_l_t, {}).get("bridge")  # (B, D)
 
             # ── Alignment loss ────────────────────────────────────────────────
             if align_active and h_gen is not None and h_mem_late is not None:
                 tgt_ids = batch["target_ids"]  # (B, max_entity_len)
-                if args.loss_variant == "rep_distill":
+                align_loss = 0.0
+                
+                if args.loss_variant == "rep_distill" or args.loss_variant == "hybrid":
                     # Average RepDist over both source layers
                     align_loss  = rep_distill_loss(h_mem_early, h_gen) * 0.5
                     align_loss += rep_distill_loss(h_mem_late, h_gen)  * 0.5
+                    
+                    # Fix 1: BridgeAlign (Align intermediate bridge entities)
+                    if h_gen_bridge is not None and h_mem_bridge_late is not None:
+                        bridge_align  = rep_distill_loss(h_mem_bridge_early, h_gen_bridge) * 0.5
+                        bridge_align += rep_distill_loss(h_mem_bridge_late, h_gen_bridge)  * 0.5
+                        # Add bridge alignment to total alignment loss (weighted)
+                        align_loss = align_loss * 0.6 + bridge_align * 0.4
+                        
+                    if args.loss_variant == "hybrid":
+                        if phi_probe_fn is not None:
+                            pl_loss = phi_probe_fn(h_gen, tgt_ids)
+                        else:
+                            pl_loss = contrastive_loss(h_mem_late, h_gen, temperature=0.07)
+                        align_loss = 0.5 * align_loss + 0.5 * pl_loss
+                        
                 elif args.loss_variant == "contrastive":
                     # InfoNCE — average over both source layers, τ=0.07
                     align_loss  = contrastive_loss(h_mem_early, h_gen,
@@ -478,17 +509,6 @@ def train(args):
                         align_loss = phi_probe_fn(h_gen, tgt_ids)
                     else:
                         align_loss = rep_distill_loss(h_mem_late, h_gen)  # fallback
-                elif args.loss_variant == "hybrid":
-                    # α·RepDist + (1-α)·ProbeLoss, α=0.5
-                    rd_loss = (rep_distill_loss(h_mem_early, h_gen) * 0.5
-                               + rep_distill_loss(h_mem_late, h_gen) * 0.5)
-                    if phi_probe_fn is not None:
-                        pl_loss = phi_probe_fn(h_gen, tgt_ids)
-                    else:
-                        pl_loss = contrastive_loss(h_mem_late, h_gen, temperature=0.07)
-                    align_loss = 0.5 * rd_loss + 0.5 * pl_loss
-                else:
-                    align_loss = rep_distill_loss(h_mem_late, h_gen)  # safety fallback
 
                 total_loss = ce_loss + args.lambda_align * align_loss
                 epoch_align_loss += align_loss.item()
