@@ -6,7 +6,7 @@
 #  Requires: baseline already completed (data prep, profiling, baseline run)
 # ════════════════════════════════════════════════════════════════════════════
 
-#SBATCH --job-name=align_%a
+#SBATCH --job-name=align
 #SBATCH --account=mhahsler_course_recomm_0001
 #SBATCH --partition=batch
 #SBATCH --nodes=1
@@ -69,8 +69,8 @@ export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:512,expandable_segments:True"
 nvidia-smi 2>/dev/null | head -12 || echo "nvidia-smi unavailable"
 echo ""
 
-PRIME_DATA="${WORK_DIR}/data/processed/stark_prime_qa.jsonl"
-MAG_DATA="${WORK_DIR}/data/processed/stark_mag_qa.jsonl"
+PRIME_DATA="${WORK_DIR}/data/processed/stark_prime_qa_v2.jsonl"
+MAG_DATA="${WORK_DIR}/data/processed/stark_mag_qa_v2.jsonl"
 PROFILE_PATH="${WORK_DIR}/data/processed/layer_profile_${MODEL_KEY}.json"
 PROBE_PATH="${WORK_DIR}/data/processed/probe_phi_${MODEL_KEY}.pt"
 
@@ -109,7 +109,7 @@ for LOSS_VARIANT in rep_distill contrastive probe hybrid; do
         fi
 
         # Skip if already done
-        RUN_DIR="outputs/runs/${MODEL_KEY}/stark_${DATASET}"
+        RUN_DIR="outputs/runs_v2/${MODEL_KEY}/stark_${DATASET}"
         EXPECTED_SLUG="${MODEL_ID//\//-}_${LOSS_VARIANT}_lam${LAMBDA}_seed42"
         # Use the -- replacement like train_sft.py does
         EXPECTED_SLUG2="${MODEL_ID//\//-}"
@@ -136,7 +136,7 @@ for LOSS_VARIANT in rep_distill contrastive probe hybrid; do
             --lr            2e-4 \
             --lora_rank     16 \
             --layer_profile "${PROFILE_PATH}" \
-            --out_dir       "outputs/runs/${MODEL_KEY}/stark_${DATASET}" \
+            --out_dir       "outputs/runs_v2/${MODEL_KEY}/stark_${DATASET}" \
             --hf_cache      "${HF_CACHE}" \
             --seed          42 \
             2>&1

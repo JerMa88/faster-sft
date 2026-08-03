@@ -19,7 +19,7 @@
 #    done
 # ════════════════════════════════════════════════════════════════════════════
 
-#SBATCH --job-name=sft_%a
+#SBATCH --job-name=sft
 #SBATCH --account=mhahsler_course_recomm_0001
 #SBATCH --partition=batch
 #SBATCH --nodes=1
