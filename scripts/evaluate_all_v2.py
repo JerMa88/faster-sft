@@ -41,7 +41,7 @@ def main():
     dtype  = torch.bfloat16 if device.type == "cuda" else torch.float32
     print(f"Device: {device}  Dtype: {dtype}")
 
-    runs = sorted(glob.glob("outputs/runs/*/*/*"), key=lambda p: (0 if "qwen" in p else (2 if "nanbeige" in p else 1), p))
+    runs = sorted(glob.glob("outputs/runs_v2/*/*/*"), key=lambda p: (0 if "qwen" in p else (2 if "nanbeige" in p else 1), p))
     print(f"Found {len(runs)} run directories to evaluate.\n")
 
     results = {}
@@ -55,9 +55,9 @@ def main():
             print(f"Skipping unknown model key: {model_key}")
             continue
 
-        data_file = ROOT / "data" / "processed" / f"stark_{dataset_name.replace('stark_', '')}_qa.jsonl"
+        data_file = ROOT / "data" / "processed" / f"stark_{dataset_name.replace('stark_', '')}_qa_v2.jsonl"
         if not data_file.exists():
-            data_file = ROOT / "data" / "processed" / "stark_prime_qa.jsonl"
+            data_file = ROOT / "data" / "processed" / "stark_prime_qa_v2.jsonl"
 
         if (Path(run_dir) / "eval_results.json").exists():
             print(f"Skipping already evaluated run: {run_dir}")
@@ -83,7 +83,7 @@ def main():
         except Exception as e:
             print(f"  [ERROR] Evaluation failed for {run_dir}: {e}")
 
-    summary_file = ROOT / "outputs" / "final_evaluation_summary.json"
+    summary_file = ROOT / "outputs" / "final_evaluation_summary_v2.json"
     with open(summary_file, "w") as f:
         json.dump(results, f, indent=2)
 

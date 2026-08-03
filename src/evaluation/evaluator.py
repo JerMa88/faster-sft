@@ -168,6 +168,113 @@ def _run_generative_eval(
 
             prompts.append(full_text)
 
+def _manual_generate_item(
+    model,
+    tokenizer,
+    prompt: str,
+    max_new_tokens: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> str:
+    """
+    Per-example manual autoregressive generation with KV-caching.
+    Avoids left-padding positional corruption for custom architectures (e.g. Nanbeige).
+    """
+    enc = tokenizer(prompt, return_tensors="pt").to(device)
+    input_ids = enc["input_ids"]
+    generated = input_ids.clone()
+    past_key_values = None
+    curr_input_ids = input_ids
+
+    for step in range(max_new_tokens):
+        with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
+            try:
+                outputs = model(input_ids=curr_input_ids, past_key_values=past_key_values, use_cache=True)
+                past = getattr(outputs, "past_key_values", None)
+                if past is not None:
+                    past_key_values = past
+                else:
+                    past_key_values = None
+            except Exception:
+                outputs = model(input_ids=generated)
+                past_key_values = None
+
+        next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        generated = torch.cat([generated, next_token], dim=1)
+        curr_input_ids = next_token if past_key_values is not None else generated
+
+        if tokenizer.eos_token_id is not None and next_token.item() == tokenizer.eos_token_id:
+            break
+
+    gen_tokens = generated[0, input_ids.shape[1]:]
+    return tokenizer.decode(gen_tokens, skip_special_tokens=True)
+
+
+@torch.no_grad()
+def _run_generative_eval(
+    model,
+    tokenizer,
+    data_path:    str,
+    device:       torch.device,
+    dtype:        torch.dtype,
+    kind:         str = "gen",   # "mem" or "gen"
+    max_new_tokens: int = 32,
+    batch_size:   int = 16,
+) -> tuple[list[str], list[str]]:
+    """
+    Multi-token generative evaluation.
+    Auto-detects custom models like Nanbeige and uses per-item zero-padding KV-cache generation.
+    """
+    import json as _json
+
+    # Read raw data
+    data = []
+    with open(data_path, 'r') as f:
+        for line in f:
+            data.append(_json.loads(line))
+
+    all_preds   = []
+    all_targets = []
+
+    # Check if model is Nanbeige or custom architecture requiring per-item generation
+    is_custom_model = False
+    model_name = str(type(model)).lower() + str(getattr(model, "name_or_path", "")).lower()
+    if hasattr(model, "config"):
+        model_name += str(getattr(model.config, "_name_or_path", "")).lower() + str(getattr(model.config, "model_type", "")).lower()
+    if "nanbeige" in model_name:
+        is_custom_model = True
+
+    if is_custom_model:
+        # Route custom models through single-example zero-padding KV-cache generation
+        for item in data:
+            target_entity = item["target_entity"]
+            all_targets.append(target_entity)
+            if kind == "mem":
+                full_text = f"Context: {item['document']}\nQuery: What entity is this about?\nAnswer: "
+            else:
+                full_text = f"Query: {item['query']}\nAnswer: "
+            
+            pred_text = _manual_generate_item(model, tokenizer, full_text, max_new_tokens, device, dtype)
+            all_preds.append(pred_text)
+        return all_preds, all_targets
+
+    # Process standard models in batches
+    for batch_start in range(0, len(data), batch_size):
+        batch_items = data[batch_start : batch_start + batch_size]
+
+        prompts  = []
+        targets  = []
+        for item in batch_items:
+            target_entity = item["target_entity"]
+            targets.append(target_entity)
+
+            if kind == "mem":
+                full_text = f"Context: {item['document']}\nQuery: What entity is this about?\nAnswer: "
+            else:
+                full_text = f"Query: {item['query']}\nAnswer: "
+
+            prompts.append(full_text)
+
         # Tokenize prompts (left-pad for generation)
         tokenizer.padding_side = "left"
         encodings = tokenizer(
@@ -178,9 +285,6 @@ def _run_generative_eval(
             max_length=480,  # leave room for generation
         ).to(device)
 
-        # Try model.generate() first; fall back to manual loop for
-        # architectures whose KV cache doesn't support it (e.g. Granite
-        # hybrid attention, LFM state-space hybrid).
         try:
             with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
                 gen_ids = model.generate(
@@ -190,31 +294,19 @@ def _run_generative_eval(
                     num_beams=1,
                     pad_token_id=tokenizer.pad_token_id,
                 )
+            prompt_len = encodings["input_ids"].shape[1]
+            for b_idx in range(len(batch_items)):
+                generated_tokens = gen_ids[b_idx, prompt_len:]
+                pred_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                all_preds.append(pred_text)
+                all_targets.append(targets[b_idx])
+
         except Exception as gen_err:
-            # Fallback: manual autoregressive generation via forward pass
-            input_ids = encodings["input_ids"]
-            attn_mask = encodings["attention_mask"]
-            generated = input_ids.clone()
-
-            for _ in range(max_new_tokens):
-                with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
-                    outputs = model(input_ids=generated, attention_mask=attn_mask)
-                next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                generated = torch.cat([generated, next_token], dim=1)
-                attn_mask = torch.cat([attn_mask, torch.ones_like(next_token)], dim=1)
-                # Stop if all sequences produced EOS
-                if (next_token.squeeze(-1) == tokenizer.eos_token_id).all():
-                    break
-
-            gen_ids = generated
-
-        # Extract only the generated tokens (after the prompt)
-        prompt_len = encodings["input_ids"].shape[1]
-        for b_idx in range(len(batch_items)):
-            generated_tokens = gen_ids[b_idx, prompt_len:]
-            pred_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-            all_preds.append(pred_text)
-            all_targets.append(targets[b_idx])
+            # Fallback for individual items in batch if model.generate fails
+            for b_idx, prompt in enumerate(prompts):
+                pred_text = _manual_generate_item(model, tokenizer, prompt, max_new_tokens, device, dtype)
+                all_preds.append(pred_text)
+                all_targets.append(targets[b_idx])
 
     return all_preds, all_targets
 

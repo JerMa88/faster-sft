@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --time=08:00:00
+#SBATCH --time=12:00:00
 #SBATCH --mem=64G
 #SBATCH --output=outputs/logs/eval_v3_align_%j.out
 #SBATCH --error=outputs/logs/eval_v3_align_%j.err
