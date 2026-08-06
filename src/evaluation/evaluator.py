@@ -37,8 +37,10 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.evaluation.metrics import (
-    string_accuracy, convergence_epoch, auc_curve,
+    string_accuracy, strict_accuracy, strict_accuracy_with_indicators,
+    accuracy_with_wilson_ci, convergence_epoch, auc_curve,
 )
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -346,14 +348,20 @@ def evaluate_checkpoint(
         kind="gen", batch_size=batch_size,
     )
 
-    a_mem = string_accuracy(mem_preds, mem_targets)
-    a_gen = string_accuracy(gen_preds, gen_targets)
+    # Strict EM (primary ACL metric) & per-instance indicators
+    a_mem_strict, mem_indicators = strict_accuracy_with_indicators(mem_preds, mem_targets)
+    a_gen_strict, gen_indicators = strict_accuracy_with_indicators(gen_preds, gen_targets)
+
+    # Lenient match (secondary / backward compatibility metric)
+    a_mem_lenient = string_accuracy(mem_preds, mem_targets)
+    a_gen_lenient = string_accuracy(gen_preds, gen_targets)
 
     if verbose:
-        print(f"    A_mem={a_mem:.3f}  A_gen={a_gen:.3f}")
+        print(f"    Strict : A_mem={a_mem_strict:.3f}  A_gen={a_gen_strict:.3f}")
+        print(f"    Lenient: A_mem={a_mem_lenient:.3f}  A_gen={a_gen_lenient:.3f}")
         # Print a few examples for spot-checking
         for i in range(min(3, len(mem_preds))):
-            match_sym = "✓" if a_mem > 0 else "✗"
+            match_sym = "✓" if mem_indicators[i] else "✗"
             print(f"      [{match_sym}] pred='{mem_preds[i][:50]}' "
                   f"target='{mem_targets[i][:50]}'")
 
@@ -363,11 +371,19 @@ def evaluate_checkpoint(
         torch.cuda.empty_cache()
 
     return {
-        "checkpoint":  str(checkpoint_path),
-        "A_mem":       round(a_mem, 4),
-        "A_gen":       round(a_gen, 4),
-        "n_examples":  len(mem_preds),
+        "checkpoint":   str(checkpoint_path),
+        # Strict EM (primary)
+        "A_mem_strict": round(a_mem_strict, 4),
+        "A_gen_strict": round(a_gen_strict, 4),
+        # Lenient match (secondary / backward compat)
+        "A_mem":        round(a_mem_lenient, 4),
+        "A_gen":        round(a_gen_lenient, 4),
+        # Per-instance binary correctness (1=correct, 0=wrong) for McNemar
+        "mem_correct":  mem_indicators,
+        "gen_correct":  gen_indicators,
+        "n_examples":   len(mem_preds),
     }
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -417,38 +433,103 @@ def evaluate_run(
         epoch_results.append(result)
 
     # Build accuracy curves
-    epochs    = [r["epoch"] for r in epoch_results]
-    a_mem_curve = [r["A_mem"] for r in epoch_results]
-    a_gen_curve = [r["A_gen"] for r in epoch_results]
+    epochs = [r["epoch"] for r in epoch_results]
 
-    # Convergence on A_gen
-    t_conv = convergence_epoch(a_gen_curve, threshold, start_epoch=epochs[0])
-    auc    = auc_curve(a_gen_curve)
+    # Strict EM curves (primary ACL metrics)
+    a_mem_curve_strict = [r["A_mem_strict"] for r in epoch_results]
+    a_gen_curve_strict = [r["A_gen_strict"] for r in epoch_results]
 
-    # Check baseline gate: A_mem ≥ 0.978 at epoch 3 checkpoint
+    # Lenient curves (secondary / backward compat)
+    a_mem_curve_lenient = [r["A_mem"] for r in epoch_results]
+    a_gen_curve_lenient = [r["A_gen"] for r in epoch_results]
+
+    # Final epoch correctness indicators
+    final_result = epoch_results[-1]
+    mem_correct_final = final_result["mem_correct"]
+    gen_correct_final = final_result["gen_correct"]
+
+    # Wilson CIs for final epoch
+    mem_ci_strict = accuracy_with_wilson_ci(mem_correct_final)
+    gen_ci_strict = accuracy_with_wilson_ci(gen_correct_final)
+
+    # Convergence on strict A_gen
+    t_conv_strict = convergence_epoch(a_gen_curve_strict, threshold, start_epoch=epochs[0])
+    auc_strict    = auc_curve(a_gen_curve_strict)
+
+    # Convergence on lenient A_gen (backward compat)
+    t_conv_lenient = convergence_epoch(a_gen_curve_lenient, threshold, start_epoch=epochs[0])
+    auc_lenient    = auc_curve(a_gen_curve_lenient)
+
+    # Check baseline gate: A_mem_strict ≥ 0.978 at epoch 3 checkpoint
     gate_result = None
     for r in epoch_results:
         if r["epoch"] == 3:
-            gate_result = r["A_mem"] >= 0.978
+            gate_result = r["A_mem_strict"] >= 0.978
             if verbose:
                 status = "✅ PASS" if gate_result else "❌ FAIL"
-                print(f"\n  Baseline gate (A_mem @ epoch3 ≥ 0.978): "
-                      f"{r['A_mem']:.3f} → {status}")
+                print(f"\n  Baseline gate (A_mem_strict @ epoch3 ≥ 0.978): "
+                      f"{r['A_mem_strict']:.3f} → {status}")
+
+    # Check for per-task-type breakdown (chaining vs intersection) in dataset
+    task_type_breakdown = {}
+    try:
+        data_items = []
+        with open(data_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    data_items.append(json.loads(line))
+
+        task_types = [item.get("task_type") for item in data_items]
+        if any(tt in ("chaining", "intersection") for tt in task_types):
+            for tt in ("chaining", "intersection"):
+                indices = [i for i, t in enumerate(task_types) if t == tt]
+                if indices:
+                    sub_mem = [mem_correct_final[i] for i in indices]
+                    sub_gen = [gen_correct_final[i] for i in indices]
+                    mem_stats = accuracy_with_wilson_ci(sub_mem)
+                    gen_stats = accuracy_with_wilson_ci(sub_gen)
+                    task_type_breakdown[tt] = {
+                        "n_examples": len(indices),
+                        "A_mem_strict": mem_stats["acc"],
+                        "A_mem_strict_ci": [mem_stats["ci_lo"], mem_stats["ci_hi"]],
+                        "A_gen_strict": gen_stats["acc"],
+                        "A_gen_strict_ci": [gen_stats["ci_lo"], gen_stats["ci_hi"]],
+                        "mem_correct": sub_mem,
+                        "gen_correct": sub_gen,
+                    }
+    except Exception as tt_err:
+        if verbose:
+            print(f"  [NOTE] Task-type breakdown skipped: {tt_err}")
 
     summary = {
-        "run_dir":        str(run_dir),
-        "base_model_id":  base_model_id,
-        "data_path":      data_path,
-        "epochs":         epochs,
-        "A_mem_curve":    [round(a, 4) for a in a_mem_curve],
-        "A_gen_curve":    [round(a, 4) for a in a_gen_curve],
-        "A_mem_final":    round(a_mem_curve[-1], 4),
-        "A_gen_final":    round(a_gen_curve[-1], 4),
-        "T_conv":         t_conv,
-        "AUC":            round(auc, 4),
-        "threshold":      threshold,
-        "baseline_gate":  gate_result,
-        "per_epoch":      epoch_results,
+        "run_dir":            str(run_dir),
+        "base_model_id":      base_model_id,
+        "data_path":          data_path,
+        "epochs":             epochs,
+        # Strict EM primary metrics
+        "A_mem_curve_strict": [round(a, 4) for a in a_mem_curve_strict],
+        "A_gen_curve_strict": [round(a, 4) for a in a_gen_curve_strict],
+        "A_mem_strict_final": round(a_mem_curve_strict[-1], 4),
+        "A_gen_strict_final": round(a_gen_curve_strict[-1], 4),
+        "A_mem_strict_ci":    [round(mem_ci_strict["ci_lo"], 4), round(mem_ci_strict["ci_hi"], 4)],
+        "A_gen_strict_ci":    [round(gen_ci_strict["ci_lo"], 4), round(gen_ci_strict["ci_hi"], 4)],
+        "T_conv_strict":      t_conv_strict,
+        "AUC_strict":         round(auc_strict, 4),
+        # Lenient secondary / backward compat metrics
+        "A_mem_curve":        [round(a, 4) for a in a_mem_curve_lenient],
+        "A_gen_curve":        [round(a, 4) for a in a_gen_curve_lenient],
+        "A_mem_final":        round(a_mem_curve_lenient[-1], 4),
+        "A_gen_final":        round(a_gen_curve_lenient[-1], 4),
+        "T_conv":             t_conv_lenient,
+        "AUC":                round(auc_lenient, 4),
+        "threshold":          threshold,
+        "baseline_gate":      gate_result,
+        # Final epoch correctness vectors (for McNemar significance testing)
+        "mem_correct_final":  mem_correct_final,
+        "gen_correct_final":  gen_correct_final,
+        # Per-task-type breakdown (if task_type present in data)
+        "task_types":         task_type_breakdown,
+        "per_epoch":          epoch_results,
     }
 
     # Save
@@ -457,10 +538,13 @@ def evaluate_run(
         json.dump(summary, f, indent=2)
     if verbose:
         print(f"\n  Saved → {out_path}")
-        print(f"  A_gen_final={summary['A_gen_final']:.3f}  "
-              f"T_conv={t_conv}  AUC={auc:.3f}")
+        print(f"  Strict:  A_gen_final={summary['A_gen_strict_final']:.3f}  "
+              f"T_conv={t_conv_strict}  AUC={auc_strict:.3f}")
+        print(f"  Lenient: A_gen_final={summary['A_gen_final']:.3f}  "
+              f"T_conv={t_conv_lenient}  AUC={auc_lenient:.3f}")
 
     return summary
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
