@@ -36,12 +36,21 @@ MODEL_ID_MAP = {
     "lfm2.5-1.2b":    "LiquidAI/LFM2.5-1.2B-Base",
 }
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_key", type=str, default=None, help="Filter by model key")
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.bfloat16 if device.type == "cuda" else torch.float32
     print(f"Device: {device}  Dtype: {dtype}")
 
-    runs = sorted(glob.glob("outputs/runs_v2/*/*/*"), key=lambda p: (0 if "qwen" in p else (2 if "nanbeige" in p else 1), p))
+    if args.model_key:
+        runs = sorted(glob.glob(f"outputs/runs_v2/{args.model_key}/*/*"))
+    else:
+        runs = sorted(glob.glob("outputs/runs_v2/*/*/*"), key=lambda p: (0 if "qwen" in p else (2 if "nanbeige" in p else 1), p))
     print(f"Found {len(runs)} run directories to evaluate.\n")
 
     results = {}
