@@ -31,9 +31,9 @@ echo "  Started: $(date)"
 echo "══════════════════════════════════════════════════"
 
 if [[ -n "${MODEL_KEY}" ]]; then
-    ${PYTHON} scripts/evaluate_all_v2.py --model_key "${MODEL_KEY}" 2>&1
+    ${PYTHON} scripts/evaluation/evaluate_all_v2.py --model_key "${MODEL_KEY}" 2>&1
 else
-    ${PYTHON} scripts/evaluate_all_v2.py 2>&1
+    ${PYTHON} scripts/evaluation/evaluate_all_v2.py 2>&1
 fi
 
 echo "══════════════════════════════════════════════════"

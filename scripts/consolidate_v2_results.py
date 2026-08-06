@@ -3,7 +3,7 @@ import glob
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 
 def consolidate():
     eval_files = glob.glob(str(ROOT / "outputs" / "runs_v2" / "*" / "*" / "*" / "eval_results.json"))

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 
 def analyze():
     v1_path = ROOT / "outputs" / "final_evaluation_summary.json"

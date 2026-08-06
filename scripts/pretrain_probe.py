@@ -25,7 +25,7 @@ import json
 import argparse
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 HF_CACHE = str(ROOT / "hf_cache")

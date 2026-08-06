@@ -104,7 +104,7 @@ MAG_DATA="${WORK_DIR}/data/processed/stark_mag_qa.jsonl"
 
 if [[ ! -f "${PRIME_DATA}" || ! -f "${MAG_DATA}" ]]; then
     echo ">>> [1/4] Building STaRK QA pairs …"
-    ${PYTHON} scripts/prepare_data.py \
+    ${PYTHON} scripts/data_prep/prepare_data.py \
         --dataset both \
         --num_facts 1000 \
         2>&1
@@ -122,7 +122,7 @@ PROFILE_PATH="${WORK_DIR}/data/processed/layer_profile_${MODEL_KEY}.json"
 
 if [[ ! -f "${PROFILE_PATH}" ]]; then
     echo ">>> [2/5] Running layer profiling for ${MODEL_KEY} …"
-    ${PYTHON} scripts/run_profiling.py \
+    ${PYTHON} scripts/training/run_profiling.py \
         --model_id    "${MODEL_ID}" \
         --data_path   "${PRIME_DATA}" \
         --n_probe_samples 200 \
@@ -143,7 +143,7 @@ PROBE_PATH="${WORK_DIR}/data/processed/probe_phi_${MODEL_KEY}.pt"
 
 if [[ ! -f "${PROBE_PATH}" ]]; then
     echo ">>> [2b/5] Pretraining φ* probe for ${MODEL_KEY} …"
-    ${PYTHON} scripts/pretrain_probe.py \
+    ${PYTHON} scripts/training/pretrain_probe.py \
         --model_key   "${MODEL_KEY}" \
         --data_path   "${PRIME_DATA}" \
         --layer_profile "${PROFILE_PATH}" \
@@ -169,7 +169,7 @@ for DATASET in "prime" "mag"; do
     fi
 
     echo "    >> Baseline LoRA — STaRK-${DATASET^^} …"
-    ${PYTHON} scripts/train_sft.py \
+    ${PYTHON} scripts/training/train_sft.py \
         --model_id      "${MODEL_ID}" \
         --model_key     "${MODEL_KEY}" \
         --data_path     "${DATA_FILE}" \
@@ -237,7 +237,7 @@ for LOSS_VARIANT in rep_distill contrastive probe hybrid; do
         fi
 
         echo "    >> ${LOSS_VARIANT} — STaRK-${DATASET^^} …"
-        ${PYTHON} scripts/train_sft.py \
+        ${PYTHON} scripts/training/train_sft.py \
             --model_id      "${MODEL_ID}" \
             --model_key     "${MODEL_KEY}" \
             --data_path     "${DATA_FILE}" \

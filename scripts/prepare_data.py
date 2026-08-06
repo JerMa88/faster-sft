@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 # Redirect HF cache before importing datasets/transformers
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 HF_CACHE = str(ROOT / "hf_cache")

@@ -79,7 +79,7 @@ PROBE_PATH="${WORK_DIR}/data/processed/probe_phi_${MODEL_KEY}.pt"
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ ! -f "${PROBE_PATH}" ]]; then
     echo ">>> Pretraining φ* probe for ${MODEL_KEY} …"
-    ${PYTHON} scripts/pretrain_probe.py \
+    ${PYTHON} scripts/training/pretrain_probe.py \
         --model_key   "${MODEL_KEY}" \
         --data_path   "${PRIME_DATA}" \
         --layer_profile "${PROFILE_PATH}" \
@@ -123,7 +123,7 @@ for LOSS_VARIANT in rep_distill contrastive probe hybrid; do
         fi
 
         echo "    >> ${LOSS_VARIANT} — STaRK-${DATASET^^} …"
-        ${PYTHON} scripts/train_sft.py \
+        ${PYTHON} scripts/training/train_sft.py \
             --model_id      "${MODEL_ID}" \
             --model_key     "${MODEL_KEY}" \
             --data_path     "${DATA_FILE}" \
