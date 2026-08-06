@@ -41,11 +41,23 @@ import argparse
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_key", type=str, default=None, help="Filter by model key")
+    parser.add_argument("--batch_size", type=int, default=32, help="Inference batch size (reduce for CUDA-unstable models)")
     args = parser.parse_args()
+
+    # Slurm sets CUDA_VISIBLE_DEVICES when --gres=gpu:1 is requested.
+    # If it's set but torch can't see a GPU, something went wrong with CUDA
+    # init (race condition on multi-job nodes). Abort loudly rather than
+    # silently running 10+ hours on CPU.
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cuda_visible and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"CUDA_VISIBLE_DEVICES={cuda_visible!r} but torch.cuda.is_available()=False. "
+            "Likely a CUDA init race on a multi-job node. Resubmit the job."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.bfloat16 if device.type == "cuda" else torch.float32
-    print(f"Device: {device}  Dtype: {dtype}")
+    print(f"Device: {device}  Dtype: {dtype}  CUDA_VISIBLE_DEVICES={cuda_visible!r}")
 
     if args.model_key:
         runs = sorted(glob.glob(f"outputs/runs_v2/{args.model_key}/*/*"))
@@ -84,7 +96,7 @@ def main():
                 data_path=str(data_file),
                 device=device,
                 dtype=dtype,
-                batch_size=32,
+                batch_size=args.batch_size,
                 hf_cache=HF_CACHE,
                 verbose=True,
             )
