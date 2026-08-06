@@ -114,7 +114,7 @@ The KUG hypothesis predicts that standard SFT injects facts into early storage l
 To eliminate the 4 theoretical bottlenecks, the V2 alignment suite introduced multi-span bridge entity distillation, dynamic target layer scaling across epochs, and graph-aware hard negative contrastive loss.
 
 > [!NOTE]
-> 31 of 40 runs evaluated. `antares-1b` (8 runs, jobs 471313) and `nanbeige4.2-3b` (8 runs, job 471314) are currently re-evaluating on cluster (killed by server restart). `gemma4-e4b/stark_prime/rep_distill` re-queued as job 471315. Rows marked `—` are pending.
+> 32 of 40 runs evaluated. `antares-1b` (8 runs) and `nanbeige4.2-3b` (8 runs) are actively evaluating on cluster (job 471407). Rows marked `—` are pending. `gemma4-e4b` is now fully evaluated across all 8 runs.
 
 ### Summary: V2 Alignment Suite vs Baseline SFT
 
@@ -135,7 +135,7 @@ To eliminate the 4 theoretical bottlenecks, the V2 alignment suite introduced mu
 | gemma4-e4b           | stark_mag    | probe          |      0.431 |      0.007 |       0.002 |   0.0040 |
 | gemma4-e4b           | stark_mag    | hybrid         |      0.426 |      0.009 |       0.001 |   0.0042 |
 |----------------------|--------------|----------------|------------|------------|-------------|----------|
-| gemma4-e4b           | stark_prime  | rep_distill    |          — |          — |           — |        — |
+| gemma4-e4b           | stark_prime  | rep_distill    |      0.251 |      0.017 |       0.012 |   0.0111 |
 | gemma4-e4b           | stark_prime  | contrastive    |      0.222 |      0.012 |       0.010 |   0.0090 |
 | gemma4-e4b           | stark_prime  | probe          |      0.246 |      0.017 |       0.013 |   0.0111 |
 | gemma4-e4b           | stark_prime  | hybrid         |      0.241 |      0.016 |       0.012 |   0.0110 |
@@ -186,7 +186,7 @@ To eliminate the 4 theoretical bottlenecks, the V2 alignment suite introduced mu
 | Model                | Dataset      | V1 Baseline $A_{\text{gen}}$ | V2 Best $A_{\text{gen}}$ | Best Variant      | Relative Gain |
 |----------------------|--------------|------------------------------|--------------------------|-------------------|---------------|
 | gemma4-e4b           | stark_mag    |                        0.001 |                    0.003 | rep_distill       |     +200.0%   |
-| gemma4-e4b           | stark_prime  |                        0.017 |                    0.013 | probe             |      -23.5%   |
+| gemma4-e4b           | stark_prime  |                        0.017 |                    0.013 | probe/rep_distill |      -23.5%   |
 | lfm2.5-1.2b          | stark_mag    |                        0.004 |                    0.008 | hybrid/probe      |     +100.0%   |
 | lfm2.5-1.2b          | stark_prime  |                        0.068 |                    0.045 | probe             |      -33.8%   |
 | llama3.2-3b          | stark_mag    |                        0.083 |                    0.048 | rep_distill       |      -42.2%   |
