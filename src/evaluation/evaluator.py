@@ -338,15 +338,34 @@ def evaluate_checkpoint(
         checkpoint_path, base_model_id, device, dtype, hf_cache
     )
 
-    # Generative evaluation
-    mem_preds, mem_targets = _run_generative_eval(
-        model, tokenizer, data_path, device, dtype,
-        kind="mem", batch_size=batch_size,
-    )
-    gen_preds, gen_targets = _run_generative_eval(
-        model, tokenizer, data_path, device, dtype,
-        kind="gen", batch_size=batch_size,
-    )
+    mem_preds: list = []
+    mem_targets: list = []
+    gen_preds: list = []
+    gen_targets: list = []
+    try:
+        # Generative evaluation
+        mem_preds, mem_targets = _run_generative_eval(
+            model, tokenizer, data_path, device, dtype,
+            kind="mem", batch_size=batch_size,
+        )
+        gen_preds, gen_targets = _run_generative_eval(
+            model, tokenizer, data_path, device, dtype,
+            kind="gen", batch_size=batch_size,
+        )
+    finally:
+        # Always free GPU memory — even if a CUDA error is thrown mid-eval.
+        # Without this, a CUDA crash leaves the device in a broken state and
+        # every subsequent run in the same process will fail immediately.
+        del model
+        if device.type == "cuda":
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except Exception:
+                pass  # GPU already in bad state; best-effort cleanup
+
+    if not mem_preds:
+        raise RuntimeError("No predictions generated — eval aborted (CUDA crash or empty dataset).")
 
     # Strict EM (primary ACL metric) & per-instance indicators
     a_mem_strict, mem_indicators = strict_accuracy_with_indicators(mem_preds, mem_targets)
@@ -364,11 +383,6 @@ def evaluate_checkpoint(
             match_sym = "✓" if mem_indicators[i] else "✗"
             print(f"      [{match_sym}] pred='{mem_preds[i][:50]}' "
                   f"target='{mem_targets[i][:50]}'")
-
-    # Free GPU memory
-    del model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
 
     return {
         "checkpoint":   str(checkpoint_path),
@@ -423,14 +437,41 @@ def evaluate_run(
               f"{[c.name for c in checkpts]}")
 
     epoch_results = []
+    cuda_dead = False  # track if GPU is in a bad state
     for ckpt in checkpts:
         epoch_num = int(ckpt.name.replace("checkpoint_epoch", ""))
-        result    = evaluate_checkpoint(
-            str(ckpt), base_model_id, data_path,
-            device, dtype, batch_size, hf_cache, verbose
+        if cuda_dead:
+            print(f"    [SKIP] checkpoint_epoch{epoch_num} — GPU in bad state, skipping.")
+            continue
+        try:
+            result = evaluate_checkpoint(
+                str(ckpt), base_model_id, data_path,
+                device, dtype, batch_size, hf_cache, verbose
+            )
+            result["epoch"] = epoch_num
+            epoch_results.append(result)
+        except RuntimeError as e:
+            err_str = str(e)
+            print(f"    [ERROR] checkpoint_epoch{epoch_num}: {err_str[:200]}")
+            if "CUDA" in err_str or "cuda" in err_str:
+                # Best-effort GPU state reset so the next run can start fresh
+                print("    [INFO] CUDA error detected — attempting device reset…")
+                try:
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                # If the GPU is truly dead, mark it so we skip remaining checkpoints
+                # but let the outer loop continue to the next *run* (different model load)
+                cuda_dead = True
+            # Continue to next checkpoint (or break this run); do not propagate
+
+
+    if not epoch_results:
+        raise RuntimeError(
+            f"All checkpoints failed for run {run_dir.name}. "
+            "Check CUDA errors above."
         )
-        result["epoch"] = epoch_num
-        epoch_results.append(result)
 
     # Build accuracy curves
     epochs = [r["epoch"] for r in epoch_results]
