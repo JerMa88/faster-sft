@@ -23,7 +23,14 @@
 \usepackage{bm}
 \usepackage{url}
 
+\usepackage{pifont}     % for \cmark / \xmark
+\usepackage{array}      % for column type >{\bfseries}
+
 \hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+% check/cross marks
+\newcommand{\cmark}{\ding{51}}%  ✓
+\newcommand{\xmark}{\ding{55}}%  ✗
 
 % convenience math operators
 \newcommand{\Amem}{A_{\text{mem}}}
@@ -41,6 +48,9 @@
 
 \newtheorem{theorem}{Theorem}
 \newtheorem{proposition}{Proposition}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
 
 \title{Routing Facts to Reasoning Circuits:\\
 Closing the Knowing-Using Gap via Training-Time\\
