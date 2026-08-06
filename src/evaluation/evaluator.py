@@ -38,6 +38,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.evaluation.metrics import (
     string_accuracy, strict_accuracy, strict_accuracy_with_indicators,
+    relaxed_accuracy_with_indicators, relaxed_exact_match,
     accuracy_with_wilson_ci, convergence_epoch, auc_curve,
 )
 
@@ -367,35 +368,41 @@ def evaluate_checkpoint(
     if not mem_preds:
         raise RuntimeError("No predictions generated — eval aborted (CUDA crash or empty dataset).")
 
-    # Strict EM (primary ACL metric) & per-instance indicators
-    a_mem_strict, mem_indicators = strict_accuracy_with_indicators(mem_preds, mem_targets)
-    a_gen_strict, gen_indicators = strict_accuracy_with_indicators(gen_preds, gen_targets)
+    # ── Primary metric: relaxed EM (gold ⊆ pred, unidirectional substring) ──
+    # Follows Mem2Gen / KUG paper convention; appropriate for multi-word STARK
+    # paper titles where the model often generates the correct title followed by
+    # trailing tokens that strict EM would unfairly penalize.
+    a_mem_relaxed, mem_indicators = relaxed_accuracy_with_indicators(mem_preds, mem_targets)
+    a_gen_relaxed, gen_indicators = relaxed_accuracy_with_indicators(gen_preds, gen_targets)
 
-    # Lenient match (secondary / backward compatibility metric)
-    a_mem_lenient = string_accuracy(mem_preds, mem_targets)
-    a_gen_lenient = string_accuracy(gen_preds, gen_targets)
+    # ── Secondary metric: strict EM (no substring, ACL conservative bound) ──
+    a_mem_strict, mem_strict_ind = strict_accuracy_with_indicators(mem_preds, mem_targets)
+    a_gen_strict, gen_strict_ind = strict_accuracy_with_indicators(gen_preds, gen_targets)
 
     if verbose:
-        print(f"    Strict : A_mem={a_mem_strict:.3f}  A_gen={a_gen_strict:.3f}")
-        print(f"    Lenient: A_mem={a_mem_lenient:.3f}  A_gen={a_gen_lenient:.3f}")
-        # Print a few examples for spot-checking
+        print(f"    Relaxed: A_mem={a_mem_relaxed:.3f}  A_gen={a_gen_relaxed:.3f}  [PRIMARY — gold-in-pred]")
+        print(f"    Strict : A_mem={a_mem_strict:.3f}  A_gen={a_gen_strict:.3f}  [secondary — exact]")
+        # Spot-check using relaxed indicators
         for i in range(min(3, len(mem_preds))):
             match_sym = "✓" if mem_indicators[i] else "✗"
             print(f"      [{match_sym}] pred='{mem_preds[i][:50]}' "
                   f"target='{mem_targets[i][:50]}'")
 
     return {
-        "checkpoint":   str(checkpoint_path),
-        # Strict EM (primary)
-        "A_mem_strict": round(a_mem_strict, 4),
-        "A_gen_strict": round(a_gen_strict, 4),
-        # Lenient match (secondary / backward compat)
-        "A_mem":        round(a_mem_lenient, 4),
-        "A_gen":        round(a_gen_lenient, 4),
-        # Per-instance binary correctness (1=correct, 0=wrong) for McNemar
-        "mem_correct":  mem_indicators,
-        "gen_correct":  gen_indicators,
-        "n_examples":   len(mem_preds),
+        "checkpoint":     str(checkpoint_path),
+        # Relaxed EM (PRIMARY — gold-in-pred substring, follows KUG/Mem2Gen)
+        "A_mem":          round(a_mem_relaxed, 4),
+        "A_gen":          round(a_gen_relaxed, 4),
+        # Strict EM (SECONDARY — conservative ACL bound)
+        "A_mem_strict":   round(a_mem_strict, 4),
+        "A_gen_strict":   round(a_gen_strict, 4),
+        # Per-instance correctness vectors for McNemar test (relaxed, primary)
+        "mem_correct":    mem_indicators,
+        "gen_correct":    gen_indicators,
+        # Per-instance correctness vectors (strict, for sensitivity analysis)
+        "mem_correct_strict": mem_strict_ind,
+        "gen_correct_strict": gen_strict_ind,
+        "n_examples":     len(mem_preds),
     }
 
 

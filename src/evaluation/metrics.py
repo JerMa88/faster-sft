@@ -103,6 +103,48 @@ def strict_accuracy_with_indicators(
     return acc, indicators
 
 
+def relaxed_exact_match(predicted: str, target: str) -> bool:
+    """
+    Primary metric for multi-word entity recall (following Mem2Gen / KUG paper).
+
+    Credits the model if the normalized target appears ANYWHERE in the normalized
+    prediction. This handles the common case where the model generates the correct
+    paper title followed by trailing generation artifacts (e.g. newlines, extra
+    sentences), which strict EM would unfairly penalize.
+
+    UNIDIRECTIONAL (gold ⊆ pred only) — NOT bidirectional.
+    The old broken string_exact_match did (gold in pred OR pred in gold), which
+    inflated scores when a short prediction was a truncation of a long gold title.
+    Here, only gold ⊆ pred is checked: a prediction shorter than the target is
+    always a miss.
+    """
+    pred_norm = normalize_answer_strict(predicted)
+    tgt_norm  = normalize_answer_strict(target)
+    if not tgt_norm:
+        return False
+    return pred_norm == tgt_norm or tgt_norm in pred_norm
+
+
+def relaxed_accuracy_with_indicators(
+    predictions: list[str], targets: list[str]
+) -> tuple[float, list[int]]:
+    """
+    Returns (accuracy, per_instance_binary_list) using relaxed_exact_match.
+    Binary list is 1 for match, 0 for mismatch (needed for McNemar test).
+    PRIMARY reporting metric for STARK-MAG/Prime datasets.
+    """
+    if len(predictions) == 0:
+        return 0.0, []
+    if len(predictions) != len(targets):
+        raise ValueError(
+            f"predictions and targets must have same length, "
+            f"got {len(predictions)} vs {len(targets)}"
+        )
+    indicators = [int(relaxed_exact_match(p, t)) for p, t in zip(predictions, targets)]
+    acc = float(sum(indicators) / len(indicators)) if indicators else 0.0
+    return acc, indicators
+
+
 
 def string_exact_match(predicted: str, target: str) -> bool:
     """
