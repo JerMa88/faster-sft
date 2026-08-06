@@ -1,0 +1,3 @@
+[submodule "kug_eval"]
+	path = kug_eval
+	url = https://github.com/JerMa88/kug_eval.git
