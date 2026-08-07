@@ -276,14 +276,24 @@ def _run_generative_eval(
     is_antares = "antares" in model_name
 
     if is_custom_model:
-        # Route custom models through single-example zero-padding KV-cache generation
+        # Route custom models through single-example KV-cache generation
+        # Nanbeige4.2 uses ChatML format (<|im_start|>/<|im_end|>) — wrap prompts accordingly
+        is_nanbeige = "nanbeige" in model_name
         for item in data:
             target_entity = item["target_entity"]
             all_targets.append(target_entity)
             if kind == "mem":
-                full_text = f"Context: {item['document']}\nQuery: What entity is this about?\nAnswer: "
+                content = f"Context: {item['document']}\nQuery: What entity is this about? Answer with just the entity name."
             else:
-                full_text = f"Query: {item['query']}\nAnswer: "
+                content = f"Query: {item['query']}\nAnswer with just the entity name."
+            if is_nanbeige:
+                full_text = (
+                    f"<|im_start|>system\nYou are a helpful assistant. Answer in English.<|im_end|>\n"
+                    f"<|im_start|>user\n{content}<|im_end|>\n"
+                    f"<|im_start|>assistant\n"
+                )
+            else:
+                full_text = f"{content}\nAnswer: "
             pred_text = _manual_generate_item(model, tokenizer, full_text, max_new_tokens, device, dtype)
             all_preds.append(pred_text)
         return all_preds, all_targets
