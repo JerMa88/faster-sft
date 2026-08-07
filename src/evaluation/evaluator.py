@@ -483,40 +483,45 @@ def evaluate_run(
     # Build accuracy curves
     epochs = [r["epoch"] for r in epoch_results]
 
-    # Strict EM curves (primary ACL metrics)
-    a_mem_curve_strict = [r["A_mem_strict"] for r in epoch_results]
-    a_gen_curve_strict = [r["A_gen_strict"] for r in epoch_results]
+    # ── Relaxed EM curves (PRIMARY — follows KUG/Mem2Gen) ──
+    a_mem_curve         = [r["A_mem"]        for r in epoch_results]
+    a_gen_curve         = [r["A_gen"]        for r in epoch_results]
 
-    # Lenient curves (secondary / backward compat)
-    a_mem_curve_lenient = [r["A_mem"] for r in epoch_results]
-    a_gen_curve_lenient = [r["A_gen"] for r in epoch_results]
+    # ── Strict EM curves (SECONDARY — conservative ACL bound) ──
+    a_mem_curve_strict  = [r["A_mem_strict"] for r in epoch_results]
+    a_gen_curve_strict  = [r["A_gen_strict"] for r in epoch_results]
 
     # Final epoch correctness indicators
-    final_result = epoch_results[-1]
-    mem_correct_final = final_result["mem_correct"]
-    gen_correct_final = final_result["gen_correct"]
+    final_result         = epoch_results[-1]
+    mem_correct_relaxed  = final_result["mem_correct"]         # relaxed
+    gen_correct_relaxed  = final_result["gen_correct"]         # relaxed
+    mem_correct_strict   = final_result.get("mem_correct_strict", mem_correct_relaxed)
+    gen_correct_strict   = final_result.get("gen_correct_strict", gen_correct_relaxed)
 
-    # Wilson CIs for final epoch
-    mem_ci_strict = accuracy_with_wilson_ci(mem_correct_final)
-    gen_ci_strict = accuracy_with_wilson_ci(gen_correct_final)
+    # Wilson CIs for final epoch (both relaxed and strict)
+    mem_ci_relaxed = accuracy_with_wilson_ci(mem_correct_relaxed)
+    gen_ci_relaxed = accuracy_with_wilson_ci(gen_correct_relaxed)
+    mem_ci_strict  = accuracy_with_wilson_ci(mem_correct_strict)
+    gen_ci_strict  = accuracy_with_wilson_ci(gen_correct_strict)
 
-    # Convergence on strict A_gen
-    t_conv_strict = convergence_epoch(a_gen_curve_strict, threshold, start_epoch=epochs[0])
-    auc_strict    = auc_curve(a_gen_curve_strict)
+    # Convergence on relaxed A_gen (primary)
+    t_conv         = convergence_epoch(a_gen_curve,        threshold, start_epoch=epochs[0])
+    auc            = auc_curve(a_gen_curve)
 
-    # Convergence on lenient A_gen (backward compat)
-    t_conv_lenient = convergence_epoch(a_gen_curve_lenient, threshold, start_epoch=epochs[0])
-    auc_lenient    = auc_curve(a_gen_curve_lenient)
+    # Convergence on strict A_gen (secondary)
+    t_conv_strict  = convergence_epoch(a_gen_curve_strict, threshold, start_epoch=epochs[0])
+    auc_strict     = auc_curve(a_gen_curve_strict)
 
-    # Check baseline gate: A_mem_strict ≥ 0.978 at epoch 3 checkpoint
+    # Baseline gate: A_mem (relaxed, primary) >= 0.978 at epoch 3
+    # Using relaxed EM consistent with primary metric convention
     gate_result = None
     for r in epoch_results:
         if r["epoch"] == 3:
-            gate_result = r["A_mem_strict"] >= 0.978
+            gate_result = r["A_mem"] >= 0.978
             if verbose:
                 status = "✅ PASS" if gate_result else "❌ FAIL"
-                print(f"\n  Baseline gate (A_mem_strict @ epoch3 ≥ 0.978): "
-                      f"{r['A_mem_strict']:.3f} → {status}")
+                print(f"\n  Baseline gate (A_mem_relaxed @ epoch3 >= 0.978): "
+                      f"{r['A_mem']:.3f} → {status}")
 
     # Check for per-task-type breakdown (chaining vs intersection) in dataset
     task_type_breakdown = {}
@@ -554,7 +559,16 @@ def evaluate_run(
         "base_model_id":      base_model_id,
         "data_path":          data_path,
         "epochs":             epochs,
-        # Strict EM primary metrics
+        # ── Relaxed EM (PRIMARY — gold-in-pred, follows KUG/Mem2Gen) ──
+        "A_mem_curve":        [round(a, 4) for a in a_mem_curve],
+        "A_gen_curve":        [round(a, 4) for a in a_gen_curve],
+        "A_mem_final":        round(a_mem_curve[-1], 4),
+        "A_gen_final":        round(a_gen_curve[-1], 4),
+        "A_mem_ci":           [round(mem_ci_relaxed["ci_lo"], 4), round(mem_ci_relaxed["ci_hi"], 4)],
+        "A_gen_ci":           [round(gen_ci_relaxed["ci_lo"], 4), round(gen_ci_relaxed["ci_hi"], 4)],
+        "T_conv":             t_conv,
+        "AUC":                round(auc, 4),
+        # ── Strict EM (SECONDARY — exact match, conservative ACL bound) ──
         "A_mem_curve_strict": [round(a, 4) for a in a_mem_curve_strict],
         "A_gen_curve_strict": [round(a, 4) for a in a_gen_curve_strict],
         "A_mem_strict_final": round(a_mem_curve_strict[-1], 4),
@@ -563,13 +577,6 @@ def evaluate_run(
         "A_gen_strict_ci":    [round(gen_ci_strict["ci_lo"], 4), round(gen_ci_strict["ci_hi"], 4)],
         "T_conv_strict":      t_conv_strict,
         "AUC_strict":         round(auc_strict, 4),
-        # Lenient secondary / backward compat metrics
-        "A_mem_curve":        [round(a, 4) for a in a_mem_curve_lenient],
-        "A_gen_curve":        [round(a, 4) for a in a_gen_curve_lenient],
-        "A_mem_final":        round(a_mem_curve_lenient[-1], 4),
-        "A_gen_final":        round(a_gen_curve_lenient[-1], 4),
-        "T_conv":             t_conv_lenient,
-        "AUC":                round(auc_lenient, 4),
         "threshold":          threshold,
         "baseline_gate":      gate_result,
         # Final epoch correctness vectors (for McNemar significance testing)
