@@ -537,8 +537,8 @@ def evaluate_run(
             for tt in ("chaining", "intersection"):
                 indices = [i for i, t in enumerate(task_types) if t == tt]
                 if indices:
-                    sub_mem = [mem_correct_final[i] for i in indices]
-                    sub_gen = [gen_correct_final[i] for i in indices]
+                    sub_mem = [mem_correct_relaxed[i] for i in indices]
+                    sub_gen = [gen_correct_relaxed[i] for i in indices]
                     mem_stats = accuracy_with_wilson_ci(sub_mem)
                     gen_stats = accuracy_with_wilson_ci(sub_gen)
                     task_type_breakdown[tt] = {
@@ -580,8 +580,8 @@ def evaluate_run(
         "threshold":          threshold,
         "baseline_gate":      gate_result,
         # Final epoch correctness vectors (for McNemar significance testing)
-        "mem_correct_final":  mem_correct_final,
-        "gen_correct_final":  gen_correct_final,
+        "mem_correct_final":  mem_correct_relaxed,
+        "gen_correct_final":  gen_correct_relaxed,
         # Per-task-type breakdown (if task_type present in data)
         "task_types":         task_type_breakdown,
         "per_epoch":          epoch_results,
