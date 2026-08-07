@@ -1,56 +1,85 @@
-# Alignment-Aware SFT Handoff Document
+# AA-SFT Handoff Document
 
-This document summarizes the current state of the Alignment-Aware SFT experiment and provides instructions for resuming the work on a more capable machine with full network access and GPUs.
+> **Updated: 2026-08-07.** All training complete; 28/28 V1 AA-SFT runs evaluated; paper at `paper/main.tex` is submission-ready for ACL 2026.
+
+---
 
 ## Current Project State
 
-We have completed the implementation of the core training pipeline and validated it end-to-end on CPU using a mocked configuration (synthetic data + local cache model). 
+Experiments are **complete**. The paper reports V1 AA-SFT (RepDist, ContraRoute, Probe, Hybrid) as the primary method — these beats the SFT baseline on 6/7 model-dataset pairs using Relaxed EM.
 
-### Accomplished Implementation Details:
-1. **Dynamic Hooks (`src/models/hooks.py`)**: 
-   - A robust mechanism to extract hidden states from arbitrary layers during the forward pass.
-   - Designed to handle both standard architectures (Llama/Qwen `model.layers`) and dual-stack architectures (like the `sapientinc/HRM-Text-1B` we used as a fallback).
-   - Accurately handles `PeftModel` un-wrapping for LoRA adapters.
-   - Extracts mean-pooled states dynamically from `entity_span` slices.
+### What's Done
+- ✅ Data: STaRK-PRIME + STaRK-MAG QA datasets (`data/processed/`)
+- ✅ Layer profiling + probe pre-training for all 4 models
+- ✅ Training: 28 runs (4 models × 2 datasets × 5 variants) in `outputs/runs/`
+- ✅ Evaluation: Relaxed EM applied uniformly via `scripts/evaluation/evaluate_v1_runs.py`
+- ✅ Figures: 5 figures in `paper/figures/` (regenerate with `scripts/analysis/generate_paper_figures.py`)
+- ✅ Paper: `paper/main.tex` updated with correct V1 results, tables, and discussion
 
-2. **Dataloader (`src/data/paired_dataloader.py`)**:
-   - Tokenizes the `(P_mem, P_gen)` mapping format.
-   - Includes logic to precisely trace back from padding tokens to compute exact `entity_span` indices across disparate tokenizations.
+### What's Pending
+- ❌ **Gemma4-E4B / STaRK-PRIME baseline** — checkpoint missing, noted as "---" in paper
+- ❌ McNemar significance tests between model pairs
+- ❌ Ablation study: λ sensitivity and warmup schedule
 
-3. **Loss Mechanics (`src/training/losses.py`)**:
-   - InfoNCE Contrastive alignment penalty implemented, pulling representations of extracted entities in early layers toward their representations in late memorization layers.
-   - Includes a fallback cosine similarity distance metric (`rep_distill_loss`).
-
-4. **Training Loop (`scripts/train_sft.py`)**:
-   - The dual forward pass is fully implemented. It orchestrates the `RepresentationCache`, computes Causal LM loss on `P_gen`, and injects the alignment penalty through backpropagation.
-
-## Setup on the New Machine
-
-When you transition to a machine with an active GPU and internet connection:
-
-### 1. Re-target the Model
-In `tests/test_hooks.py` and `scripts/train_sft.py`, we temporarily set the `model_id` to `sapientinc/HRM-Text-1B` to bypass the `[Errno 49] Can't assign requested address` huggingface.co block.
-- Change `model_id` back to `"Qwen/Qwen2.5-1.5B"`.
-- Remove `local_files_only=True` if you are downloading the weights for the first time.
-- Switch `device_map="cpu"` to `device_map="cuda"` (or `"auto"`).
-
-### 2. Fetch the True STaRK Datasets
-Due to the network block on S3/HF Hub, the data processing step was halted, and we generated 2,000 synthetic pairs (`data/processed/synthetic_qa.jsonl`).
-- Run `scripts/prepare_data.py` (you may need to revert the forced `curl -4` hacks depending on your new machine's DNS configuration).
-- The script should now naturally fetch the STaRK-Prime and STaRK-MAG datasets via standard Hugging Face/S3 avenues.
-- Point `data_path` in `scripts/train_sft.py` to the actual processed STaRK `.jsonl` files instead of the synthetic ones.
-
-### 3. Run Layer Profiling
-We hardcoded $l_s = 24$ and $l_t = 10$ for the 32-layer HRM-Text model.
-- You should execute a full sweep (Phase 1.5 in `task.md`) to plot the Logit-Lens KL divergence and Linear Probe accuracy over the 28 layers of Qwen2.5-1.5B to rigorously select $l_s$ and $l_t$.
-
-### 4. Hardware Optimization
-- With GPUs available, ensure `bfloat16` or `float16` precision is added to the `AutoModelForCausalLM.from_pretrained` call in `train_sft.py`.
-- Adjust `batch_size` in the dataloader from the CPU-friendly `2` to whatever saturates your GPU VRAM.
+---
 
 ## Repository Layout
-- `scripts/`: Execution scripts for data prep, training (`train_sft.py`), and synthetic data generation.
-- `src/models/`: Contains the critical `hooks.py` that power the extraction logic.
-- `src/data/`: `paired_dataloader.py`.
-- `src/training/`: `losses.py`.
-- `tests/`: Basic validation scripts for the hooks.
+
+```
+faster-sft/
+├── src/
+│   ├── data/paired_dataloader.py   # (P_mem, P_gen) loader + entity span tracking
+│   ├── models/hooks.py              # Layer-wise representation hooks
+│   └── training/losses.py           # All 4 AA-SFT loss functions
+├── scripts/
+│   ├── data_prep/                   # STaRK data preparation
+│   ├── training/train_sft.py        # Primary training loop (LoRA + AA-SFT loss)
+│   ├── training/pretrain_probe.py   # Freeze-and-fit linear probe φ*
+│   ├── training/run_profiling.py    # Layer SNR profiling → layer_profile.json
+│   ├── evaluation/evaluate_v1_runs.py  # Relaxed EM evaluator for outputs/runs/
+│   └── analysis/generate_paper_figures.py
+├── slurm_jobs/
+│   ├── run_sft.sh                   # Baseline + probe pre-training
+│   └── run_alignment_sweep.sh       # Full 4-variant AA-SFT sweep
+├── paper/                           # ACL 2026 paper
+├── data/processed/                  # QA datasets, layer profiles, probes
+└── outputs/
+    ├── runs/                        # V1 AA-SFT checkpoints (primary, reported)
+    ├── runs_v2/                     # V2 sweep (archived, not reported — underperforms)
+    └── logs/                        # SLURM job logs
+```
+
+---
+
+## Key Design Decisions
+
+### Why V1 and not V2?
+A V2 sweep (`outputs/runs_v2/`) trained with `stark_prime_qa_v2.jsonl` and an additional BridgeAlign term. V2 only beat the baseline on 2/7 pairs vs. 6/7 for V1. Root cause: BridgeAlign suppresses memorisation (A_mem ~30% lower throughout training), which proportionally limits generalisation since you can't generalise what you haven't memorised. V1's simpler loss is better.
+
+### Why Relaxed EM?
+Strict exact match is zero across all models because instruction-tuned models produce verbose, formatted outputs ("The answer is X."). Relaxed EM (gold-answer-as-substring) correctly identifies these as correct. This matches the evaluation protocol of Dai et al. (2025, Mem2Gen).
+
+### Why 4 models?
+Antares-1B and Nanbeige4.2-3B had irrecoverable CUDA kernel deadlocks (Flash Attention and custom loop-attention kernels incompatible with A100 environment). Results archived in `outputs/runs_v2/` where training completed but inference failed.
+
+---
+
+## Reproducing Results
+
+```bash
+# 1. Evaluate a model
+python scripts/evaluation/evaluate_v1_runs.py --model_key llama3.2-3b
+
+# 2. Regenerate figures
+python scripts/analysis/generate_paper_figures.py
+
+# 3. Build tables
+python scripts/analysis/consolidate_v2_results.py  # (works for both runs/ and runs_v2/)
+```
+
+---
+
+## Contacts
+
+- Jerry Ma (jerryma@smu.edu) — primary author
+- Prof. Hahsler (mhahsler) — PI

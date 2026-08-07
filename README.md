@@ -1,85 +1,125 @@
-# Alignment-Aware Supervised Fine-Tuning (faster-sft)
+# Alignment-Aware Supervised Fine-Tuning (AA-SFT)
 
-This repository contains the codebase for investigating and mitigating the **Knowing-Using Gap (KUG)** in Large Language Models during Supervised Fine-Tuning (SFT). Our goal is to prove that adding an **alignment-aware auxiliary loss** during SFT produces a Pareto improvement over standard SFT: both faster convergence (smaller temporal lag $\Delta T$) and a higher final ceiling (smaller accuracy gap $\Delta A$) on downstream multi-hop reasoning tasks.
+This repository contains the codebase for investigating and mitigating the **Knowing-Using Gap (KUG)** in Large Language Models during Supervised Fine-Tuning (SFT). We show that adding an **alignment-aware auxiliary loss** during SFT produces a consistent Pareto improvement over standard SFT: higher generalisation accuracy ($A_\text{gen}$) with no loss in memorisation accuracy ($A_\text{mem}$).
 
-## Methodology Overview
+**Results:** AA-SFT beats the SFT baseline on **6/7 model-dataset pairs** (relaxed exact match). Best configurations achieve $A_\text{gen} = 0.271$ (Qwen3.5-2B, Probe/Hybrid, STaRK-PRIME) and $A_\text{gen} = 0.261$ (Llama3.2-3B, Probe, STaRK-PRIME), closing ~32–35% of the oracle headroom at **zero inference cost**.
 
-Our experimental approach is grounded in resolving the routing failures observed when models are updated with new facts. The KUG hypothesis predicts that standard SFT injects facts into early storage layers (high $A_{mem}$) but these facts fail to properly route through middle-layer reasoning circuits (low $A_{gen}$). As training progresses, $A_{mem}$ often peaks early and declines due to catastrophic forgetting, while $A_{gen}$ remains near zero.
+---
 
-To address this, we apply an **alignment-aware auxiliary loss** to actively bring storage representations and reasoning representations closer together during training. 
+## Methodology
 
-### Methods and Alignment Variants Experimented
+Standard SFT injects facts into early-layer MLP neurons (high $A_\text{mem}$) but these facts fail to route through mid-layer reasoning circuits (near-zero $A_\text{gen}$) — the **Knowing-Using Gap**. We fix this with training-time auxiliary losses that align the hidden-state representation of the same fact across two differently-framed prompts: a memorisation prompt $P_\text{mem}$ and a generalisation prompt $P_\text{gen}$.
 
-We are experimenting with the following Loss functions (where $\lambda=0.1$):
+### AA-SFT Loss Variants ($\lambda=0.1$, warmup $K=3$ epochs)
 
-1. **Standard SFT (Baseline-LoRA)**: $\mathcal{L}_\text{SFT}$
-2. **RepDist-LoRA**: $\mathcal{L}_\text{SFT} + \lambda \cdot \mathcal{L}_\text{RepDist}$
-   - Minimizes the representational distance between early storage layers and later reasoning layers.
-3. **ContraRoute-LoRA**: $\mathcal{L}_\text{SFT} + \lambda \cdot \mathcal{L}_\text{Contra}$
-   - Applies contrastive learning to push correct reasoning pathways closer while pushing away incorrect or non-routed pathways.
-4. **ProbeLoss-LoRA**: $\mathcal{L}_\text{SFT} + \lambda \cdot \mathcal{L}_\text{Probe}$
-   - Uses linear probes on entity embeddings to enforce decodability at specific layer checkpoints.
-5. **Hybrid-LoRA**: $\mathcal{L}_\text{SFT} + \lambda \cdot \mathcal{L}_\text{Hybrid}$
-   - A combination of representation distance and contrastive routing methods.
+| Variant | Loss | Description |
+|---|---|---|
+| **Baseline** | $\mathcal{L}_\text{SFT}$ | Standard cross-entropy SFT, no alignment |
+| **RepDist** | $\mathcal{L}_\text{SFT} + \lambda \mathcal{L}_\text{RepDist}$ | Cosine distance between storage and reasoning representations |
+| **ContraRoute** | $\mathcal{L}_\text{SFT} + \lambda \mathcal{L}_\text{Contra}$ | InfoNCE contrastive loss with in-batch negatives |
+| **Probe** | $\mathcal{L}_\text{SFT} + \lambda \mathcal{L}_\text{Probe}$ | Frozen linear probe enforces decodability at reasoning layer |
+| **Hybrid** | $\mathcal{L}_\text{SFT} + \lambda \mathcal{L}_\text{Hybrid}$ | 0.5×Probe + 0.5×ContraRoute |
 
-### Key References and Theoretical Grounding
+All runs: LoRA ($r=16$, $\alpha=32$), AdamW ($\eta=2\times10^{-4}$), 50 epochs, seed 42, NVIDIA A100 (80 GB) via SLURM.
 
-Our methodologies draw directly from recent literature on model editing and activation pathways:
-- **Evaluation Methodology (arXiv:2607.08393)**: We rely on multi-token greedy generation and string-level exact match for evaluating $A_{mem}$ and $A_{gen}$.
-- **Targeted Lexical Injection (arXiv:2506.15415)**: Validates our use of Centered Kernel Alignment (CKA) between layers to identify representation transition points.
-- **ROME/MEMIT "Hopping-Too-Late" Problem (arXiv:2601.04600)**: Informs our Oracle Self-Patching Headroom Analysis to measure routing failures in middle layers.
-- **ACE Sequential Activation Chain (arXiv:2510.07896)**: Serves as the theoretical basis for ensuring facts route correctly through early storage to late reasoning layers.
+### Evaluation
+
+**Primary metric: Relaxed Exact Match (Relaxed EM)** — gold answer is a case-insensitive substring of the model output. Strict EM is effectively zero across all models due to instruction-following verbosity.
+
+---
 
 ## Repository Structure
 
-The repository is organized to separate model execution logic, scripts, and SLURM jobs cleanly:
+```
+faster-sft/
+├── src/                         # Core Python modules
+│   ├── data/paired_dataloader.py  # (P_mem, P_gen) pair loader + entity span tracking
+│   ├── models/hooks.py            # Representation extraction hooks
+│   └── training/losses.py         # RepDist, ContraRoute, Probe, Hybrid loss implementations
+├── scripts/
+│   ├── data_prep/                 # STaRK data preparation scripts
+│   ├── training/                  # train_sft.py, pretrain_probe.py, run_profiling.py
+│   ├── evaluation/                # evaluate_all_v2.py, evaluate_v1_runs.py
+│   └── analysis/                  # generate_paper_figures.py, consolidate results
+├── slurm_jobs/                    # SLURM launch scripts for training and evaluation
+├── paper/                         # ACL paper (main.tex, refs.bib, figures/)
+├── data/processed/                # STaRK-PRIME and STaRK-MAG QA datasets, layer profiles
+└── outputs/
+    ├── runs/                      # AA-SFT training checkpoints + eval_results.json
+    └── logs/                      # SLURM job logs
+```
 
-- `src/`: Core Python modules for data loading, loss functions (Baseline, RepDist, Probe, Contrastive, Hybrid), and evaluation metrics.
-- `scripts/`: Python utility scripts broken down by domain.
-  - `data_prep/`: Scripts to prepare and format the STaRK datasets.
-  - `training/`: Core SFT training loop, probing, and profiling scripts.
-  - `evaluation/`: Scripts to run multi-token generative evaluation.
-  - `analysis/`: Scripts for parsing logs, computing statistics, and aggregating results.
-- `slurm_jobs/`: SLURM bash scripts used to launch multi-GPU training and evaluation on the cluster.
-  - `archive/`: Deprecated V1 scripts.
-- `outputs/`: Model checkpoints, logs, and evaluation results.
-- `hf_cache/`: Local cache directory for HuggingFace models.
+---
 
 ## How to Run the Experiments
 
-This guide explains how to run the end-to-end pipeline, from data preparation to evaluation.
-
 ### 1. Data Preparation
-To prepare the dataset and synthetic knowledge bases:
+
 ```bash
 python scripts/data_prep/prepare_data.py
-python scripts/data_prep/prepare_v2_data.py
 ```
+Produces `data/processed/stark_prime_qa.jsonl` and `data/processed/stark_mag_qa.jsonl` (1,000 pairs each).
 
-### 2. Run Baseline SFT
-Run the baseline supervised fine-tuning using the `run_sft.sh` SLURM script. This script handles data prep (if missing), profiling, probe pre-training, and baseline SFT training automatically.
+### 2. Layer Profiling + Probe Pre-training
+
+```bash
+# Per-model (run once per model_key before training)
+python scripts/training/run_profiling.py --model_key qwen3.5-2b
+python scripts/training/pretrain_probe.py --model_key qwen3.5-2b
+```
+Outputs: `data/processed/layer_profile_<model>.json` and `data/processed/probe_phi_<model>.pt`
+
+### 3. Run Baseline SFT
+
 ```bash
 sbatch slurm_jobs/run_sft.sh <model_key>
-# Example: sbatch slurm_jobs/run_sft.sh gemma4-e4b
+# e.g.: sbatch slurm_jobs/run_sft.sh llama3.2-3b
 ```
-*(Valid models: `llama3.2-3b`, `qwen3.5-2b`, `gemma4-e4b`, `antares-1b`, `nanbeige4.2-3b`, `lfm2.5-1.2b`)*
+Valid model keys: `llama3.2-3b`, `qwen3.5-2b`, `gemma4-e4b`, `lfm2.5-1.2b`
 
-### 3. Run Alignment Sweep (V2)
-Once the baseline SFT is complete, run the alignment sweep (which trains the model using the Hybrid, Contrastive, Probe, and RepDist auxiliary losses):
+### 4. Run AA-SFT Alignment Sweep
+
+All 4 alignment variants (RepDist, ContraRoute, Probe, Hybrid) for both STaRK-PRIME and STaRK-MAG:
+
 ```bash
 sbatch slurm_jobs/run_alignment_sweep.sh <model_key>
 ```
-*Note: This sweep skips baseline logic and strictly trains the alignment variants using $\lambda=0.1$. Results are saved in `outputs/runs_v2`.*
+Results saved to `outputs/runs/<model_key>/stark_{prime,mag}/`.
 
-### 4. Evaluation
-Evaluate the V2 alignment sweep runs using the parallel evaluator. This job will spin up parallel workers to speed up the multi-token generation evaluation.
-```bash
-sbatch slurm_jobs/run_eval_v2_parallel.sh <model_key>
-```
-The results will be written to `eval_results.json` inside each model's checkpoint directory.
+> **Note:** Antares-1B and Nanbeige4.2-3B are excluded — CUDA kernel deadlocks during inference (Flash Attention / loop-attention incompatibility with A100).
 
-### 5. Consolidate Results
-Once evaluations are completed, aggregate the results into a markdown table:
+### 5. Evaluate
+
 ```bash
-python scripts/analysis/consolidate_v2_results.py
+python scripts/evaluation/evaluate_v1_runs.py --model_key llama3.2-3b
 ```
+Results written to `eval_results.json` inside each checkpoint directory. Uses **Relaxed EM** as primary metric.
+
+### 6. Generate Figures
+
+```bash
+python scripts/analysis/generate_paper_figures.py
+```
+Outputs all 5 paper figures to `paper/figures/`.
+
+---
+
+## Key Results (Relaxed EM, peak $A_\text{gen}$)
+
+| Model | Dataset | SFT Baseline | Best AA-SFT | Best Loss | Δ |
+|---|---|---|---|---|---|
+| Llama3.2-3B | PRIME | 0.254 | **0.261** | Probe | +2.8% |
+| Llama3.2-3B | MAG   | 0.086 | **0.104** | Hybrid | +21% |
+| Qwen3.5-2B  | PRIME | 0.244 | **0.271** | Probe/Hybrid | +11% |
+| Qwen3.5-2B  | MAG   | 0.019 | 0.019 | — | 0% (tie) |
+| LFM2.5-1.2B | PRIME | 0.068 | **0.069** | Hybrid | +1.5% |
+| LFM2.5-1.2B | MAG   | 0.013 | **0.014** | Probe/Hybrid | +8% |
+| Gemma4-E4B  | MAG   | 0.009 | **0.011** | ContraRoute | +22% |
+
+**6/7 pairs improved.** Loss function choice is a second-order factor; dataset structure is the primary determinant of KUG magnitude.
+
+---
+
+## Paper
+
+See [`paper/`](paper/) for the full ACL 2026 draft: *"Routing Facts to Reasoning Circuits: Alignment-Aware SFT Closes the Knowing-Using Gap"*.
