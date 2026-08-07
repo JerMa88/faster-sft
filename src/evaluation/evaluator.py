@@ -595,8 +595,9 @@ def evaluate_run(
         print(f"\n  Saved → {out_path}")
         print(f"  Strict:  A_gen_final={summary['A_gen_strict_final']:.3f}  "
               f"T_conv={t_conv_strict}  AUC={auc_strict:.3f}")
-        print(f"  Lenient: A_gen_final={summary['A_gen_final']:.3f}  "
-              f"T_conv={t_conv_lenient}  AUC={auc_lenient:.3f}")
+        print(f"  Relaxed: A_gen_final={summary['A_gen_final']:.3f}  "
+              f"T_conv={t_conv}  AUC={auc:.3f}")
+
 
     return summary
 
