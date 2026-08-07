@@ -258,10 +258,13 @@ def _run_generative_eval(
     model_name = str(type(model)).lower() + str(getattr(model, "name_or_path", "")).lower()
     if hasattr(model, "config"):
         model_name += str(getattr(model.config, "_name_or_path", "")).lower() + str(getattr(model.config, "model_type", "")).lower()
-    if "nanbeige" in model_name or "antares" in model_name:
-        # antares-1b: model.generate() silently hangs on some checkpoints;
-        # use per-item manual KV-cache generation (same path as Nanbeige)
+    if "nanbeige" in model_name:
+        # Nanbeige: KV-cache positional encoding incompatible with left-padding batch gen
         is_custom_model = True
+
+    # antares-1b hangs in model.generate() AND in manual forward pass with KV-cache.
+    # Use model.generate() with use_cache=False + per-item signal timeout (30s) as safeguard.
+    is_antares = "antares" in model_name
 
     if is_custom_model:
         # Route custom models through single-example zero-padding KV-cache generation
@@ -272,8 +275,45 @@ def _run_generative_eval(
                 full_text = f"Context: {item['document']}\nQuery: What entity is this about?\nAnswer: "
             else:
                 full_text = f"Query: {item['query']}\nAnswer: "
-            
             pred_text = _manual_generate_item(model, tokenizer, full_text, max_new_tokens, device, dtype)
+            all_preds.append(pred_text)
+        return all_preds, all_targets
+
+    if is_antares:
+        # antares-1b: forward pass hangs with KV-cache; use model.generate with
+        # use_cache=False per item + 60s signal alarm as hard timeout guard.
+        import signal
+        def _timeout_handler(signum, frame):
+            raise TimeoutError("antares generation timeout")
+        for item in data:
+            target_entity = item["target_entity"]
+            all_targets.append(target_entity)
+            if kind == "mem":
+                prompt = f"Context: {item['document']}\nQuery: What entity is this about?\nAnswer: "
+            else:
+                prompt = f"Query: {item['query']}\nAnswer: "
+            tokenizer.padding_side = "left"
+            enc = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=480).to(device)
+            pred_text = ""
+            try:
+                signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(60)  # 60s hard timeout per item
+                with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
+                    gen_ids = model.generate(
+                        **enc,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=False,
+                        num_beams=1,
+                        use_cache=False,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                    )
+                signal.alarm(0)  # cancel alarm
+                prompt_len = enc["input_ids"].shape[1]
+                pred_text = tokenizer.decode(gen_ids[0, prompt_len:], skip_special_tokens=True)
+            except (TimeoutError, Exception) as e:
+                signal.alarm(0)
+                pred_text = ""  # treat as incorrect on timeout
             all_preds.append(pred_text)
         return all_preds, all_targets
 
