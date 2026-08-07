@@ -178,16 +178,30 @@ def _manual_generate_item(
     max_new_tokens: int,
     device: torch.device,
     dtype: torch.dtype,
+    extra_stop_ids: list | None = None,
 ) -> str:
     """
     Per-example manual autoregressive generation with KV-caching.
     Avoids left-padding positional corruption for custom architectures (e.g. Nanbeige).
+    extra_stop_ids: additional token IDs to stop on (e.g. newline tokens for models
+    that don't reliably emit EOS, like antares-1b).
     """
     enc = tokenizer(prompt, return_tensors="pt").to(device)
     input_ids = enc["input_ids"]
     generated = input_ids.clone()
     past_key_values = None
     curr_input_ids = input_ids
+
+    # Build stop set: EOS + any extra stop tokens
+    stop_ids = set()
+    if tokenizer.eos_token_id is not None:
+        stop_ids.add(tokenizer.eos_token_id)
+    if extra_stop_ids:
+        stop_ids.update(extra_stop_ids)
+    # Always stop on newline tokens to avoid infinite loops
+    for nl in ["\n", "\n\n"]:
+        nl_ids = tokenizer.encode(nl, add_special_tokens=False)
+        stop_ids.update(nl_ids)
 
     for step in range(max_new_tokens):
         with torch.amp.autocast("cuda", dtype=dtype, enabled=(device.type == "cuda")):
@@ -206,7 +220,7 @@ def _manual_generate_item(
         generated = torch.cat([generated, next_token], dim=1)
         curr_input_ids = next_token if past_key_values is not None else generated
 
-        if tokenizer.eos_token_id is not None and next_token.item() == tokenizer.eos_token_id:
+        if next_token.item() in stop_ids:
             break
 
     gen_tokens = generated[0, input_ids.shape[1]:]
