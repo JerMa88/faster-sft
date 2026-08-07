@@ -91,14 +91,23 @@ def _load_model(
             from peft import PeftModel
         except ImportError:
             raise ImportError("peft not installed — cannot load LoRA checkpoint.")
-        base = AutoModelForCausalLM.from_pretrained(
-            base_model_id, config=config, cache_dir=hf_cache,
+        # For antares-1b: force eager attention to avoid Flash Attention CUDA deadlocks
+        is_antares_base = "antares" in base_model_id.lower()
+        base_kwargs = dict(
+            config=config, cache_dir=hf_cache,
             torch_dtype=dtype,
             device_map="cuda" if device.type == "cuda" else "cpu",
             trust_remote_code=True,
         )
+        if is_antares_base:
+            base_kwargs["attn_implementation"] = "eager"
+        base = AutoModelForCausalLM.from_pretrained(base_model_id, **base_kwargs)
         model = PeftModel.from_pretrained(base, str(ckpt))
+        if is_antares_base:
+            # Merge LoRA weights into base to eliminate adapter overhead in forward pass
+            model = model.merge_and_unload()
     else:
+
         model = AutoModelForCausalLM.from_pretrained(
             str(ckpt), config=config, cache_dir=hf_cache,
             torch_dtype=dtype,
