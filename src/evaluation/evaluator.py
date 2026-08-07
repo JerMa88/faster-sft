@@ -244,7 +244,9 @@ def _run_generative_eval(
     model_name = str(type(model)).lower() + str(getattr(model, "name_or_path", "")).lower()
     if hasattr(model, "config"):
         model_name += str(getattr(model.config, "_name_or_path", "")).lower() + str(getattr(model.config, "model_type", "")).lower()
-    if "nanbeige" in model_name:
+    if "nanbeige" in model_name or "antares" in model_name:
+        # antares-1b: model.generate() silently hangs on some checkpoints;
+        # use per-item manual KV-cache generation (same path as Nanbeige)
         is_custom_model = True
 
     if is_custom_model:
