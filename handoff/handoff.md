@@ -16,10 +16,17 @@ Experiments are **complete**. The paper reports V1 AA-SFT (RepDist, ContraRoute,
 - ✅ Figures: 5 figures in `paper/figures/` (regenerate with `scripts/analysis/generate_paper_figures.py`)
 - ✅ Paper: `paper/main.tex` updated with correct V1 results, tables, and discussion
 
-### What's Pending
-- ❌ **Gemma4-E4B / STaRK-PRIME baseline** — checkpoint missing, noted as "---" in paper
-- ❌ McNemar significance tests between model pairs
-- ❌ Ablation study: λ sensitivity and warmup schedule
+### What's Pending (COMPLETE OVERHAUL)
+> [!CAUTION]
+> **CRITICAL ISSUE FOUND:** Previous `faster-sft` experiments are invalid and MUST BE ABANDONED. They evaluated gradients only on $P_{gen}$, skipping $P_{mem}$, destroying baseline comparability with the KUG paper (Dai et al., 2025). 
+
+The next agent MUST execute a complete overhaul of the experimental design, restricted to `Qwen/Qwen2.5-1.5B` for now. We will run 3 precise experiments (KUG Replication, Supervised Dual-Loss, and Two-Stage Sequential Training).
+👉 **Please refer to [implementation_plan.md](file:///users/jerryma/.gemini/antigravity-ide/brain/5a2647eb-6476-41fe-b796-619a791e27d5/implementation_plan.md) for exact architecture changes.**
+
+- ❌ Study the original codebase in `Mem2Gen-71FF/` for exact data splits and baseline loss implementations.
+- ❌ Replicate Figure 7 (KUG Baseline) exactly.
+- ❌ Integrate `layer_patching.py` to generate Figure 9 permeation dynamic heatmaps and Patchscope views.
+- ❌ Run Experiment 2 (Supervised Dual-Loss) and Experiment 3 (Two-Stage Mem-to-Gen).
 
 ---
 
