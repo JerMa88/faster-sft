@@ -168,6 +168,14 @@ class PairedSTaRKDataset(Dataset):
             p_gen_text, self.tokenizer, self.max_length
         )
 
+        # Build PROMPT-ONLY versions for evaluation (text up to '\nAnswer:' without entity)
+        # These are fed to model.generate() to measure true A_mem and A_gen accuracy.
+        sep = ANSWER_SEP
+        mem_sep_pos = p_mem_text.rfind(sep)
+        gen_sep_pos = p_gen_text.rfind(sep)
+        p_mem_prompt = p_mem_text[: mem_sep_pos + len(sep)] if mem_sep_pos != -1 else p_mem_text
+        p_gen_prompt = p_gen_text[: gen_sep_pos + len(sep)] if gen_sep_pos != -1 else p_gen_text
+
         # Entity span (for Patchscope diagnostics)
         head_enc = self.tokenizer(head_entity, add_special_tokens=False)
         head_token_ids = head_enc.input_ids if head_enc.input_ids else [0]
@@ -199,14 +207,17 @@ class PairedSTaRKDataset(Dataset):
             "target_ids": torch.tensor(target_ids_padded, dtype=torch.long),
             "target_entity": target_entity,
             "head_entity": head_entity,
-            "p_mem_text": p_mem_text,
-            "p_gen_text": p_gen_text,
+            "p_mem_text": p_mem_text,          # Full text (prompt + answer) — for training labels
+            "p_gen_text": p_gen_text,           # Full text (prompt + answer) — for training labels
+            "p_mem_prompt": p_mem_prompt,       # Prompt ONLY (no answer) — for model.generate() eval
+            "p_gen_prompt": p_gen_prompt,       # Prompt ONLY (no answer) — for model.generate() eval
         }
 
 
 def collate_kug_batch(batch: list) -> dict:
     """Custom collate function for KUG dataloader."""
-    str_keys = {"id", "domain", "task_type", "target_entity", "head_entity", "p_mem_text", "p_gen_text"}
+    str_keys = {"id", "domain", "task_type", "target_entity", "head_entity",
+                "p_mem_text", "p_gen_text", "p_mem_prompt", "p_gen_prompt"}
     collated = {}
     for k in batch[0].keys():
         if k in str_keys:

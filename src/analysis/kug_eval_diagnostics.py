@@ -47,7 +47,13 @@ def relaxed_match(predicted: str, target: str) -> bool:
 
 
 def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda"):
-    """Evaluate A_mem and A_gen disaggregated by task category."""
+    """
+    Evaluate A_mem and A_gen disaggregated by task category.
+
+    CRITICAL: Uses p_mem_prompt and p_gen_prompt (text UP TO '\nAnswer:' WITHOUT the entity),
+    NOT p_mem_text (which includes the answer). This ensures model.generate() must PRODUCE
+    the answer rather than continue after it.
+    """
     model.eval()
 
     task_stats = {
@@ -61,17 +67,44 @@ def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda"):
             task = item["task_type"]
             target = item["target_entity"]
 
-            # Memorization prompt evaluation
-            p_mem_text = item["p_mem_text"]
-            inputs = tokenizer(p_mem_text, return_tensors="pt").to(device)
-            output_ids = model.generate(**inputs, max_new_tokens=32, pad_token_id=tokenizer.eos_token_id)
-            pred_mem = tokenizer.decode(output_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+            # ─── Memorization: generate entity from document context ──────────────
+            # Use PROMPT-ONLY (no answer appended) so model must generate the entity name
+            p_mem_prompt = item.get("p_mem_prompt", item["p_mem_text"])
+            inputs_mem = tokenizer(
+                p_mem_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=1024,
+            ).to(device)
+            output_mem_ids = model.generate(
+                **inputs_mem,
+                max_new_tokens=32,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+            pred_mem = tokenizer.decode(
+                output_mem_ids[0][inputs_mem.input_ids.shape[1]:],
+                skip_special_tokens=True,
+            ).strip()
 
-            # Generalization prompt evaluation
-            p_gen_text = item["p_gen_text"]
-            inputs_gen = tokenizer(p_gen_text, return_tensors="pt").to(device)
-            output_gen_ids = model.generate(**inputs_gen, max_new_tokens=32, pad_token_id=tokenizer.eos_token_id)
-            pred_gen = tokenizer.decode(output_gen_ids[0][inputs_gen.input_ids.shape[1]:], skip_special_tokens=True)
+            # ─── Generalization: generate entity from natural language query ──────
+            p_gen_prompt = item.get("p_gen_prompt", item["p_gen_text"])
+            inputs_gen = tokenizer(
+                p_gen_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=1024,
+            ).to(device)
+            output_gen_ids = model.generate(
+                **inputs_gen,
+                max_new_tokens=32,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+            pred_gen = tokenizer.decode(
+                output_gen_ids[0][inputs_gen.input_ids.shape[1]:],
+                skip_special_tokens=True,
+            ).strip()
 
             mem_is_correct = relaxed_match(pred_mem, target)
             gen_is_correct = relaxed_match(pred_gen, target)
@@ -105,13 +138,21 @@ def run_permeation_heatmap(model, tokenizer, dataset, num_layers=28, sample_size
     for l_src in range(0, num_layers, 4):
         for l_tgt in range(0, num_layers, 4):
             correct = 0
-            for item in samples:
-                # Simulated activation intervention delta gain
-                mem_text = item["p_mem"]
-                target = item["target_entity"]
-                inputs = tokenizer(mem_text, return_tensors="pt").to(device)
+            for item_raw in samples:
+                # Use p_mem WITHOUT the answer (up to '\nAnswer:') for generation
+                p_mem_full = item_raw.get("p_mem", "")
+                sep = "\nAnswer:"
+                sep_pos = p_mem_full.rfind(sep)
+                mem_prompt = p_mem_full[: sep_pos + len(sep)] if sep_pos != -1 else p_mem_full
+                target = item_raw["target_entity"]
+                inputs = tokenizer(mem_prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
                 with torch.no_grad():
-                    out = model.generate(**inputs, max_new_tokens=16, pad_token_id=tokenizer.eos_token_id)
+                    out = model.generate(
+                        **inputs,
+                        max_new_tokens=16,
+                        do_sample=False,
+                        pad_token_id=tokenizer.eos_token_id,
+                    )
                     pred = tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
                     if relaxed_match(pred, target):
                         correct += 1
@@ -215,10 +256,10 @@ def main():
         eval_metrics = run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda")
         eval_metrics["epoch"] = epoch_num
 
-        print(f"Epoch {epoch_num:02d} Results:")
+        print(f"Epoch {epoch_num:02d} Results:", flush=True)
         for k, v in eval_metrics.items():
             if isinstance(v, float):
-                print(f"  {k}: {v:.4f}")
+                print(f"  {k}: {v:.4f}", flush=True)
 
         # 2. Run permeation dynamics heatmap (every 5 epochs)
         if epoch_num % 5 == 0 or epoch_num == len(epoch_dirs):
