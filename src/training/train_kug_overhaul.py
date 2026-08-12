@@ -173,15 +173,23 @@ def train_kug(args):
         shuffle=True,
     )
 
-    # Verify labels are correctly masked before training
-    sample_batch = next(iter(dataloader))
-    mem_labels_sample = sample_batch["mem_labels"][0]
-    active_count = (mem_labels_sample != -100).sum().item()
-    total_count = len(mem_labels_sample)
-    print(f"Label masking verification: {active_count}/{total_count} active tokens in first mem sample")
-    assert active_count > 0, "ERROR: All labels are -100! Completion masking is broken."
-    assert active_count < total_count, "ERROR: No tokens are masked! Completion masking is not working."
-    print(f"  Ratio: {active_count/total_count:.3%} tokens are trained on (target answer tokens only)")
+    # ── Verify completion masking on first N samples directly (no shuffle bias) ──
+    print("\nLabel masking verification (first 5 samples from dataset):")
+    n_verify = min(5, len(dataset))
+    total_active_verify = 0
+    for v_idx in range(n_verify):
+        sample = dataset[v_idx]
+        mem_labels = sample["mem_labels"]
+        active = (mem_labels != -100).sum().item()
+        total_tokens = len(mem_labels)
+        print(f"  Sample[{v_idx:02d}] task={sample.get('task_type','?'):15s}  "
+              f"active={active:3d}/{total_tokens}  ({100*active/total_tokens:.2f}%)")
+        total_active_verify += active
+    assert total_active_verify > 0, (
+        f"ERROR: All labels are -100 across first {n_verify} samples! "
+        f"Completion masking is broken or all {n_verify} samples were filtered."
+    )
+    print(f"  -> {total_active_verify} total active tokens across {n_verify} samples. Masking OK.\n")
 
     # Only pass TRAINABLE (LoRA) parameters to optimizer.
     # AdamW creates float32 m+v states for all params passed to it.

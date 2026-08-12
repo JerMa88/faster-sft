@@ -116,13 +116,42 @@ class PairedSTaRKDataset(Dataset):
         tokenizer: PreTrainedTokenizer,
         max_length: int = 512,
     ):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
         self.data = []
+        n_filtered_no_sep = 0
+        n_filtered_too_long = 0
+
+        raw_records = []
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
-                    self.data.append(json.loads(line))
-        self.tokenizer = tokenizer
-        self.max_length = max_length
+                    raw_records.append(json.loads(line))
+
+        # ── Pre-filter: skip samples where the PROMPT portion (everything up to
+        # "\nAnswer:") is already >= max_length tokens.  Those samples would be
+        # right-truncated before the answer, yielding all-(-100) labels and
+        # contributing zero training signal while wasting a slot in the batch.
+        for item in raw_records:
+            p_mem = item.get("p_mem", "")
+            sep_pos = p_mem.rfind(ANSWER_SEP)
+            if sep_pos == -1:
+                n_filtered_no_sep += 1
+                continue
+            # Quick prefix-length check (tokenize prompt only, no padding)
+            prefix_text = p_mem[: sep_pos + len(ANSWER_SEP)]
+            prefix_len = len(tokenizer.encode(prefix_text, add_special_tokens=False))
+            if prefix_len >= max_length:
+                n_filtered_too_long += 1
+                continue
+            self.data.append(item)
+
+        total_raw = len(raw_records)
+        kept = len(self.data)
+        print(
+            f"[PairedSTaRKDataset] Loaded {kept}/{total_raw} samples "
+            f"(filtered {n_filtered_too_long} too-long, {n_filtered_no_sep} missing sep)"
+        )
 
     def __len__(self) -> int:
         return len(self.data)
