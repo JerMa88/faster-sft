@@ -1,16 +1,21 @@
 """
-Fast Decoupled Trainer for KUG Experiments
-============================================
+Fast Decoupled Trainer for KUG Experiments — v2 Completion-Only Loss
+======================================================================
 Trains Qwen/Qwen2.5-1.5B across 3 experimental regimes:
-  1. --method baseline  : L = L_CE(P_mem) for 50 epochs
-  2. --method two_stage : L = L_CE(P_mem) for Epochs 1-15, then L = L_CE(P_gen) for Epochs 16-50
+  1. --method baseline  : L = L_CE(P_mem)              for 50 epochs
+  2. --method two_stage : L = L_CE(P_mem) Epochs 1-15, then L_CE(P_gen) Epochs 16-50
   3. --method joint     : L = L_CE(P_mem) + L_CE(P_gen) for 50 epochs
+
+KEY CHANGE from v1: Cross-entropy loss is computed ONLY on answer completion tokens
+(labels != -100), matching the Mem2Gen-71FF DataCollatorForCompletionOnlyLM.
+This is what drives A_mem >= 95% convergence by epoch 10-15 as in Figure 7.
 
 Decoupled execution:
   - Performs pure gradient optimization without inline generation loops.
   - Saves adapter weights at EVERY epoch (`checkpoint-epoch-X`).
-  - Logs L_mem, L_gen, total loss, weight norms, update norms, and grad norms to W&B.
-  - Writes `run_metadata.json` containing `wandb_run_id` for post-training evaluation resumption.
+  - Logs L_mem, L_gen, total loss, num_active_tokens, weight norms, update norms,
+    and grad norms to W&B at every optimizer step and every epoch.
+  - Writes `run_metadata.json` containing `wandb_run_id` for post-training eval.
 """
 
 import os
@@ -56,21 +61,38 @@ def compute_grad_norm(model: nn.Module) -> float:
     return math.sqrt(total_norm_sq)
 
 
-def compute_sequence_loss(model, input_ids, attention_mask):
-    """Compute token-level causal language modeling cross-entropy loss."""
-    labels = input_ids.clone()
-    labels[attention_mask == 0] = -100
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+def compute_completion_loss(model, input_ids, attention_mask, labels):
+    """
+    Compute completion-only cross-entropy loss.
+
+    Labels are pre-masked: -100 for all prompt tokens, active for completion tokens.
+    This means 100% of gradient signal trains on target answer tokens only.
+
+    Args:
+        model: The language model (with or without PEFT adapters).
+        input_ids:       (B, L) full tokenized sequence.
+        attention_mask:  (B, L) attention mask.
+        labels:          (B, L) with -100 on prompt tokens, active on completion.
+
+    Returns:
+        Scalar loss (mean over active completion tokens, skipped if all -100).
+    """
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels,
+    )
     return outputs.loss
 
 
 def train_kug(args):
-    print(f"=== Starting KUG Training Overhaul ===")
+    print(f"=== Starting KUG Training Overhaul v2 (Completion-Only Loss) ===")
     print(f"Method: {args.method}")
     print(f"Base Model: {args.model_name_or_path}")
     print(f"Dataset: {args.dataset_path}")
     print(f"Epochs: {args.num_epochs}")
     print(f"Batch Size: {args.batch_size}, Grad Accum: {args.gradient_accumulation_steps}")
+    print(f"LR: {args.learning_rate}, LoRA r={args.lora_r}, alpha={args.lora_alpha}")
 
     out_dir = Path(args.output_dir) / f"{args.method}_qwen2.5-1.5b"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +100,7 @@ def train_kug(args):
     # Initialize W&B
     wandb_run = wandb.init(
         project=args.wandb_project,
-        name=f"train_{args.method}_qwen2.5-1.5b",
+        name=f"train_v2_{args.method}_qwen2.5-1.5b",
         config={
             "method": args.method,
             "base_model": args.model_name_or_path,
@@ -88,7 +110,9 @@ def train_kug(args):
             "learning_rate": args.learning_rate,
             "lora_r": args.lora_r,
             "lora_alpha": args.lora_alpha,
-        }
+            "loss_mode": "completion_only",
+            "answer_sep": "\\nAnswer:",
+        },
     )
     wandb_run_id = wandb_run.id
     print(f"W&B Run Initialized ID: {wandb_run_id}")
@@ -103,9 +127,9 @@ def train_kug(args):
         "dataset_path": args.dataset_path,
         "num_epochs": args.num_epochs,
         "output_dir": str(out_dir.resolve()),
+        "loss_mode": "completion_only",
     }
     with open(meta_path, "w") as f:
-        json.dumps(metadata, f, indent=2)
         json.dump(metadata, f, indent=2)
     print(f"Saved run metadata -> {meta_path}")
 
@@ -113,13 +137,14 @@ def train_kug(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"  # Completion-only loss: pad on right
 
     print("Loading base model onto GPU...")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         device_map="cuda",
-        trust_remote_code=True
+        trust_remote_code=True,
     )
 
     lora_config = LoraConfig(
@@ -128,12 +153,30 @@ def train_kug(args):
         lora_dropout=args.lora_dropout,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         bias="none",
-        task_type="CAUSAL_LM"
+        task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    dataloader = get_kug_dataloader(args.dataset_path, tokenizer, batch_size=args.batch_size, max_length=args.max_length, shuffle=True)
+    # Dataset already creates completion-only labels
+    dataloader = get_kug_dataloader(
+        args.dataset_path,
+        tokenizer,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        shuffle=True,
+    )
+
+    # Verify labels are correctly masked before training
+    sample_batch = next(iter(dataloader))
+    mem_labels_sample = sample_batch["mem_labels"][0]
+    active_count = (mem_labels_sample != -100).sum().item()
+    total_count = len(mem_labels_sample)
+    print(f"Label masking verification: {active_count}/{total_count} active tokens in first mem sample")
+    assert active_count > 0, "ERROR: All labels are -100! Completion masking is broken."
+    assert active_count < total_count, "ERROR: No tokens are masked! Completion masking is not working."
+    print(f"  Ratio: {active_count/total_count:.3%} tokens are trained on (target answer tokens only)")
+
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     initial_weight_norm = compute_weight_norm(model)
@@ -144,10 +187,11 @@ def train_kug(args):
         epoch_loss_mem = 0.0
         epoch_loss_gen = 0.0
         epoch_loss_total = 0.0
+        epoch_active_tokens_mem = 0
+        epoch_active_tokens_gen = 0
         num_batches = 0
 
         # Determine phase for 2-stage training
-        # Stage 1 (1-15): pure mem; Stage 2 (16-50): pure gen
         if args.method == "baseline":
             use_mem, use_gen = True, False
         elif args.method == "two_stage":
@@ -160,15 +204,30 @@ def train_kug(args):
         else:
             raise ValueError(f"Unknown method: {args.method}")
 
+        print(f"\n[Epoch {epoch:02d}/{args.num_epochs}] Phase: use_mem={use_mem}, use_gen={use_gen}", flush=True)
+
         optimizer.zero_grad()
         for step, batch in enumerate(dataloader):
             mem_ids = batch["mem_input_ids"].cuda()
             mem_mask = batch["mem_attention_mask"].cuda()
+            mem_labels = batch["mem_labels"].cuda()  # Completion-only labels
             gen_ids = batch["gen_input_ids"].cuda()
             gen_mask = batch["gen_attention_mask"].cuda()
+            gen_labels = batch["gen_labels"].cuda()  # Completion-only labels
 
-            loss_mem = compute_sequence_loss(model, mem_ids, mem_mask) if use_mem else torch.tensor(0.0, device="cuda")
-            loss_gen = compute_sequence_loss(model, gen_ids, gen_mask) if use_gen else torch.tensor(0.0, device="cuda")
+            # Count active (non-masked) tokens for diagnostics
+            n_active_mem = (mem_labels != -100).sum().item()
+            n_active_gen = (gen_labels != -100).sum().item()
+
+            if use_mem and n_active_mem > 0:
+                loss_mem = compute_completion_loss(model, mem_ids, mem_mask, mem_labels)
+            else:
+                loss_mem = torch.tensor(0.0, device="cuda")
+
+            if use_gen and n_active_gen > 0:
+                loss_gen = compute_completion_loss(model, gen_ids, gen_mask, gen_labels)
+            else:
+                loss_gen = torch.tensor(0.0, device="cuda")
 
             if args.method == "joint":
                 total_loss = loss_mem + loss_gen
@@ -183,10 +242,13 @@ def train_kug(args):
             epoch_loss_mem += loss_mem.item()
             epoch_loss_gen += loss_gen.item()
             epoch_loss_total += total_loss.item()
+            epoch_active_tokens_mem += n_active_mem
+            epoch_active_tokens_gen += n_active_gen
             num_batches += 1
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 grad_norm = compute_grad_norm(model)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 global_step += 1
@@ -202,16 +264,26 @@ def train_kug(args):
                     "train/grad_norm": grad_norm,
                     "train/weight_norm": curr_weight_norm,
                     "train/update_norm": update_norm,
+                    "train/active_tokens_mem": n_active_mem,
+                    "train/active_tokens_gen": n_active_gen,
                 })
 
         avg_loss_mem = epoch_loss_mem / max(1, num_batches)
         avg_loss_gen = epoch_loss_gen / max(1, num_batches)
         avg_loss_total = epoch_loss_total / max(1, num_batches)
+        avg_active_mem = epoch_active_tokens_mem / max(1, num_batches)
+        avg_active_gen = epoch_active_tokens_gen / max(1, num_batches)
 
         curr_weight_norm = compute_weight_norm(model)
         update_norm = abs(curr_weight_norm - initial_weight_norm)
 
-        print(f"Epoch {epoch:02d}/{args.num_epochs:02d} | Loss Mem: {avg_loss_mem:.4f} | Loss Gen: {avg_loss_gen:.4f} | Total: {avg_loss_total:.4f}")
+        print(
+            f"Epoch {epoch:02d}/{args.num_epochs:02d} | "
+            f"L_mem: {avg_loss_mem:.4f} | L_gen: {avg_loss_gen:.4f} | "
+            f"Total: {avg_loss_total:.4f} | "
+            f"Avg active tokens mem/gen: {avg_active_mem:.1f}/{avg_active_gen:.1f}",
+            flush=True,
+        )
 
         wandb.log({
             "epoch": epoch,
@@ -220,6 +292,8 @@ def train_kug(args):
             "train/epoch_loss_total": avg_loss_total,
             "train/epoch_weight_norm": curr_weight_norm,
             "train/epoch_update_norm": update_norm,
+            "train/epoch_avg_active_tokens_mem": avg_active_mem,
+            "train/epoch_avg_active_tokens_gen": avg_active_gen,
         })
 
         # Save per-epoch adapter weights
@@ -234,14 +308,14 @@ def train_kug(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train KUG overhaul models")
+    parser = argparse.ArgumentParser(description="Train KUG overhaul models v2 (completion-only loss)")
     parser.add_argument("--method", choices=["baseline", "two_stage", "joint"], required=True)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-1.5B")
     parser.add_argument("--dataset_path", type=str, default="data/processed/kug_dataset_all.jsonl")
-    parser.add_argument("--output_dir", type=str, default="outputs/kug_overhaul")
+    parser.add_argument("--output_dir", type=str, default="outputs/kug_overhaul_v2")
     parser.add_argument("--wandb_project", type=str, default="kug_overhaul_qwen1.5b")
     parser.add_argument("--num_epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
