@@ -239,3 +239,6 @@ scripts/test_eval_job.sh
 
 # SLURM eval scripts (run-specific, not part of core codebase)
 run_eval_v2.sh
+wandb/
+outputs/logs/
+outputs/kug_dryrun*/

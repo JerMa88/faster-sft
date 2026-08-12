@@ -46,7 +46,7 @@ export HF_DATASETS_CACHE="${HF_HOME}"
 PYTHON="/users/jerryma/.conda/envs/torch2.8/bin/python"
 
 echo "Executing standalone evaluation script..."
-${PYTHON} src/analysis/kug_eval_diagnostics.py \
+${PYTHON} scripts/analysis/fast_kug_eval.py \
     --ckpt_dir "${CKPT_DIR}" \
     --eval_dataset_path "data/processed/kug_dataset_all.jsonl" \
     --sample_size 200
