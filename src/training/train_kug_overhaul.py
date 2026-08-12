@@ -175,10 +175,11 @@ def train_kug(args):
 
     # ── Verify completion masking on first N samples directly (no shuffle bias) ──
     print("\nLabel masking verification (first 5 samples from dataset):")
-    n_verify = min(5, len(dataset))
+    underlying_dataset = dataloader.dataset
+    n_verify = min(5, len(underlying_dataset))
     total_active_verify = 0
     for v_idx in range(n_verify):
-        sample = dataset[v_idx]
+        sample = underlying_dataset[v_idx]
         mem_labels = sample["mem_labels"]
         active = (mem_labels != -100).sum().item()
         total_tokens = len(mem_labels)
