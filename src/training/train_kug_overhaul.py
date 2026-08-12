@@ -142,7 +142,7 @@ def train_kug(args):
     print("Loading base model onto GPU...")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,        # NOTE: use `dtype=` not deprecated `torch_dtype=`
         device_map="cuda",
         trust_remote_code=True,
     )
@@ -157,6 +157,12 @@ def train_kug(args):
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
+
+    # Enable gradient checkpointing to trade compute for activation memory.
+    # This allows larger batch sizes without OOM on backward pass.
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    print("Gradient checkpointing enabled.")
 
     # Dataset already creates completion-only labels
     dataloader = get_kug_dataloader(
@@ -177,7 +183,12 @@ def train_kug(args):
     assert active_count < total_count, "ERROR: No tokens are masked! Completion masking is not working."
     print(f"  Ratio: {active_count/total_count:.3%} tokens are trained on (target answer tokens only)")
 
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    # Only pass TRAINABLE (LoRA) parameters to optimizer.
+    # AdamW creates float32 m+v states for all params passed to it.
+    # Passing all 1.56B params -> 12+ GB of optimizer state for FROZEN weights.
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"Optimizer will track {len(trainable_params)} trainable parameter tensors.")
+    optimizer = AdamW(trainable_params, lr=args.learning_rate, weight_decay=args.weight_decay)
 
     initial_weight_norm = compute_weight_norm(model)
     global_step = 0
