@@ -106,8 +106,21 @@ def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda"):
                 skip_special_tokens=True,
             ).strip()
 
-            mem_is_correct = relaxed_match(pred_mem, target)
-            gen_is_correct = relaxed_match(pred_gen, target)
+            # Extract actual ground truth answer from p_mem_text and p_gen_text (after '\nAnswer:')
+            # For chaining & intersection, this equals target_entity ("invasive breast carcinoma", "STIM2").
+            # For fact_checking, this is "true" or "false" (while target_entity is the subject entity).
+            sep = "\nAnswer:"
+            p_mem_text = item.get("p_mem_text", "")
+            p_gen_text = item.get("p_gen_text", "")
+
+            mem_sep_pos = p_mem_text.rfind(sep)
+            gold_mem_target = p_mem_text[mem_sep_pos + len(sep):].strip() if mem_sep_pos != -1 else item["target_entity"]
+
+            gen_sep_pos = p_gen_text.rfind(sep)
+            gold_gen_target = p_gen_text[gen_sep_pos + len(sep):].strip() if gen_sep_pos != -1 else item["target_entity"]
+
+            mem_is_correct = relaxed_match(pred_mem, gold_mem_target)
+            gen_is_correct = relaxed_match(pred_gen, gold_gen_target)
 
             if task in task_stats:
                 task_stats[task]["total"] += 1
