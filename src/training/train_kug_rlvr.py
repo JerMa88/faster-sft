@@ -69,6 +69,9 @@ class RLVRQueryDataset(Dataset):
                         "task_type": item.get("task_type", "chaining"),
                         "p_gen_prompt": p_gen_prompt,
                         "target_entity": item.get("target_entity", ""),
+                        "bridge_entity": item.get("bridge_entity", ""),
+                        "chain_hops": item.get("chain_hops", []),
+                        "fc_label": item.get("fc_label", ""),
                     })
 
         print(f"[RLVRQueryDataset] Loaded {len(self.data)} prompts from {jsonl_path}")
@@ -86,6 +89,9 @@ def collate_rlvr_batch(batch: List[dict]) -> dict:
         "task_type": [b["task_type"] for b in batch],
         "p_gen_prompt": [b["p_gen_prompt"] for b in batch],
         "target_entity": [b["target_entity"] for b in batch],
+        "bridge_entity": [b["bridge_entity"] for b in batch],
+        "chain_hops": [b["chain_hops"] for b in batch],
+        "fc_label": [b["fc_label"] for b in batch],
     }
 
 
@@ -210,6 +216,9 @@ def train_rlvr(args):
             prompts = batch["p_gen_prompt"]
             targets = batch["target_entity"]
             task_types = batch["task_type"]
+            bridge_entities = batch["bridge_entity"]
+            chain_hops_list = batch["chain_hops"]
+            fc_labels = batch["fc_label"]
             B = len(prompts)
 
             # Tokenize prompts (left-padded for batch generation)
@@ -223,7 +232,7 @@ def train_rlvr(args):
             expanded_prompt_mask = prompt_mask.repeat_interleave(K, dim=0)  # (B*K, L_prompt)
             prompt_len = expanded_prompt_ids.shape[1]
 
-            # 1. Generate K rollouts per prompt with trainable policy (sampling with T=0.7)
+            # 1. Generate K rollouts per prompt with trainable policy (sampling with T=0.85)
             model.eval()
             model.set_adapter("default")
             with torch.no_grad():
@@ -243,7 +252,7 @@ def train_rlvr(args):
             completion_seqs = generated_seqs[:, prompt_len:]
             total_seq_len = generated_seqs.shape[1]
 
-            # Decode completions to text and compute verifiable rewards
+            # Decode completions to text and compute verifiable rewards with step-wise breadcrumbs
             rewards = []
             for i in range(B * K):
                 prompt_idx = i // K
@@ -252,6 +261,9 @@ def train_rlvr(args):
                     completion=completion_text,
                     target_entity=targets[prompt_idx],
                     task_type=task_types[prompt_idx],
+                    bridge_entity=bridge_entities[prompt_idx],
+                    chain_hops=chain_hops_list[prompt_idx],
+                    fc_label=fc_labels[prompt_idx],
                 )
                 rewards.append(r)
                 task = task_types[prompt_idx]
@@ -380,7 +392,7 @@ def train_rlvr(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Train KUG 2-Stage RLVR with GRPO and Verifiable Rewards")
-    parser.add_argument("--method", type=str, default="two_stage_rlvr")
+    parser.add_argument("--method", type=str, default="two_stage_breadcrumb_rlvr")
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-1.5B")
     parser.add_argument("--init_checkpoint", type=str, default="outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b/checkpoint-epoch-15")
     parser.add_argument("--dataset_path", type=str, default="data/processed/kug_dataset_all.jsonl")
@@ -390,9 +402,9 @@ def main():
     parser.add_argument("--end_epoch", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
-    parser.add_argument("--num_rollouts", type=int, default=4)
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--num_rollouts", type=int, default=8)
+    parser.add_argument("--temperature", type=float, default=0.85)
+    parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--max_prompt_length", type=int, default=256)
     parser.add_argument("--max_new_tokens", type=int, default=32)
     parser.add_argument("--kl_beta", type=float, default=0.04)

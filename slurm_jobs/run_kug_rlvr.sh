@@ -21,12 +21,14 @@ set -euo pipefail
 
 BATCH_SIZE="${1:-16}"
 GRAD_ACCUM="${2:-4}"
-NUM_ROLLOUTS="${3:-4}"
+NUM_ROLLOUTS="${3:-8}"
 KL_BETA="${4:-0.04}"
 LR="${5:-5e-5}"
+METHOD="${6:-two_stage_breadcrumb_rlvr}"
 
 echo "================================================================"
-echo "  KUG 2-Stage RLVR Training (GRPO with Verifiable Rewards)"
+echo "  KUG 2-Stage Breadcrumb RLVR Training (GRPO with Breadcrumbs)"
+echo "  Method:       ${METHOD}"
 echo "  Batch Size:   ${BATCH_SIZE}"
 echo "  Grad Accum:   ${GRAD_ACCUM}"
 echo "  Rollouts (K): ${NUM_ROLLOUTS}"
@@ -42,11 +44,11 @@ nvidia-smi
 WORK_DIR="/work/projects/mhahsler/course_recomm/allocation001/AI_Club/paper/faster-sft"
 cd "${WORK_DIR}" || { echo "ERROR: Cannot cd to ${WORK_DIR}"; exit 1; }
 
-mkdir -p outputs/logs outputs/kug_overhaul_v2/two_stage_rlvr_qwen2.5-1.5b
+mkdir -p outputs/logs "outputs/kug_overhaul_v2/${METHOD}_qwen2.5-1.5b"
 
 # Copy Stage 1 (Epochs 1-15) checkpoints so full 50-epoch eval is seamless
 STAGE1_DIR="outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b"
-RLVR_DIR="outputs/kug_overhaul_v2/two_stage_rlvr_qwen2.5-1.5b"
+RLVR_DIR="outputs/kug_overhaul_v2/${METHOD}_qwen2.5-1.5b"
 
 echo "Copying Stage 1 (Epochs 1-15) checkpoints into ${RLVR_DIR}..."
 for ep in $(seq 1 15); do
@@ -76,10 +78,10 @@ MONITOR_PID=$!
 trap "kill ${MONITOR_PID} 2>/dev/null || true; echo '=== Peak VRAM ==='; sort -t'|' -k2 -rn ${VRAM_LOG} | head -3" EXIT
 
 echo ""
-echo "--- Launching RLVR Training (Epochs 16 to 50) ---"
+echo "--- Launching Breadcrumb RLVR Training (Epochs 16 to 50) ---"
 
 ${PYTHON} src/training/train_kug_rlvr.py \
-    --method "two_stage_rlvr" \
+    --method "${METHOD}" \
     --model_name_or_path "Qwen/Qwen2.5-1.5B" \
     --init_checkpoint "${STAGE1_DIR}/checkpoint-epoch-15" \
     --dataset_path "data/processed/kug_dataset_all.jsonl" \
@@ -90,8 +92,8 @@ ${PYTHON} src/training/train_kug_rlvr.py \
     --batch_size "${BATCH_SIZE}" \
     --gradient_accumulation_steps "${GRAD_ACCUM}" \
     --num_rollouts "${NUM_ROLLOUTS}" \
-    --temperature 0.7 \
-    --top_p 0.9 \
+    --temperature 0.85 \
+    --top_p 0.95 \
     --kl_beta "${KL_BETA}" \
     --learning_rate "${LR}"
 
