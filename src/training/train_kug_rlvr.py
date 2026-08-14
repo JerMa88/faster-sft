@@ -286,11 +286,12 @@ def train_rlvr(args):
             num_response_tokens = response_mask.sum().clamp(min=1.0)
 
             # 3. Forward pass under Policy Model (default adapter) -> completion token log probs
+            target_ids = generated_seqs[:, 1:]
+            comp_targets = target_ids[:, prompt_len - 1 :]
             model.set_adapter("default")
             policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask)
             # Memory optimization: Slice logits ONLY for completion tokens (length <= 32) instead of entire prompt
             policy_comp_logits = policy_outputs.logits[:, prompt_len - 1 : -1, :]
-            comp_targets = target_ids[:, prompt_len - 1 :]
             policy_comp_log_probs = F.log_softmax(policy_comp_logits, dim=-1).gather(
                 dim=-1, index=comp_targets.unsqueeze(-1)
             ).squeeze(-1)
