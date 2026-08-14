@@ -47,7 +47,30 @@ def main():
 
     dataset = PairedSTaRKDataset(args.eval_dataset_path, tokenizer, max_length=512)
     if args.sample_size < len(dataset):
-        dataset.data = dataset.data[:args.sample_size]
+        # Stratified sampling: ensure all 3 task types are represented proportionally.
+        # Without this, the first N samples are all chaining (dataset is ordered by task),
+        # giving 0 samples to intersection and fact_checking → artificially 0% accuracy.
+        import random as _random
+        _random.seed(42)
+        by_task = {"chaining": [], "intersection": [], "fact_checking": []}
+        for item in dataset.data:
+            t = item.get("task_type", "chaining")
+            if t in by_task:
+                by_task[t].append(item)
+        # Allocate sample_size proportionally but with a floor of min(20, available)
+        total_available = sum(len(v) for v in by_task.values())
+        stratified = []
+        for task, items in by_task.items():
+            n = max(min(20, len(items)),
+                    int(args.sample_size * len(items) / max(1, total_available)))
+            _random.shuffle(items)
+            stratified.extend(items[:n])
+        # Trim to exactly sample_size if over
+        _random.shuffle(stratified)
+        dataset.data = stratified[:args.sample_size]
+        task_dist = {t: sum(1 for d in dataset.data if d.get("task_type") == t)
+                     for t in by_task}
+        print(f"Stratified eval sample: {task_dist} (total={len(dataset.data)})", flush=True)
 
     epoch_dirs = sorted(
         glob.glob(str(ckpt_dir / "checkpoint-epoch-*")),

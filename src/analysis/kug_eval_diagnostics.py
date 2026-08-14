@@ -46,88 +46,95 @@ def relaxed_match(predicted: str, target: str) -> bool:
     return t in p or p in t
 
 
-def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda"):
+def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda", batch_size=16):
     """
     Evaluate A_mem and A_gen disaggregated by task category.
 
-    CRITICAL: Uses p_mem_prompt and p_gen_prompt (text UP TO '\nAnswer:' WITHOUT the entity),
+    CRITICAL: Uses p_mem_prompt and p_gen_prompt (text UP TO '\\nAnswer:' WITHOUT the entity),
     NOT p_mem_text (which includes the answer). This ensures model.generate() must PRODUCE
     the answer rather than continue after it.
+
+    Uses batched generation (batch_size=16) for ~8x speedup over item-by-item evaluation.
     """
     model.eval()
 
     task_stats = {
-        "chaining": {"mem_correct": 0, "gen_correct": 0, "total": 0},
+        "chaining":     {"mem_correct": 0, "gen_correct": 0, "total": 0},
         "intersection": {"mem_correct": 0, "gen_correct": 0, "total": 0},
-        "fact_checking": {"mem_correct": 0, "gen_correct": 0, "total": 0},
+        "fact_checking":{"mem_correct": 0, "gen_correct": 0, "total": 0},
     }
 
-    with torch.no_grad():
-        for item in dataset:
-            task = item["task_type"]
-            target = item["target_entity"]
+    sep = "\nAnswer:"
 
-            # ─── Memorization: generate entity from document context ──────────────
-            # Use PROMPT-ONLY (no answer appended) so model must generate the entity name
-            p_mem_prompt = item.get("p_mem_prompt", item["p_mem_text"])
-            inputs_mem = tokenizer(
-                p_mem_prompt,
+    # Collect all items
+    all_items = list(dataset)
+
+    def _batched_generate(prompts):
+        """Generate outputs for a list of prompt strings in batches."""
+        all_preds = []
+        for i in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[i:i + batch_size]
+            enc = tokenizer(
+                batch_prompts,
                 return_tensors="pt",
+                padding=True,
                 truncation=True,
-                max_length=1024,
+                max_length=512,
+                padding_side="left",
             ).to(device)
-            output_mem_ids = model.generate(
-                **inputs_mem,
-                max_new_tokens=32,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-            pred_mem = tokenizer.decode(
-                output_mem_ids[0][inputs_mem.input_ids.shape[1]:],
-                skip_special_tokens=True,
-            ).strip()
+            with torch.no_grad():
+                out_ids = model.generate(
+                    **enc,
+                    max_new_tokens=32,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+            # Decode only the new tokens (after the prompt)
+            for j, (in_ids, out) in enumerate(zip(enc.input_ids, out_ids)):
+                prompt_len = in_ids.shape[0]
+                pred = tokenizer.decode(
+                    out[prompt_len:], skip_special_tokens=True
+                ).strip()
+                all_preds.append(pred)
+        return all_preds
 
-            # ─── Generalization: generate entity from natural language query ──────
-            p_gen_prompt = item.get("p_gen_prompt", item["p_gen_text"])
-            inputs_gen = tokenizer(
-                p_gen_prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=1024,
-            ).to(device)
-            output_gen_ids = model.generate(
-                **inputs_gen,
-                max_new_tokens=32,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-            pred_gen = tokenizer.decode(
-                output_gen_ids[0][inputs_gen.input_ids.shape[1]:],
-                skip_special_tokens=True,
-            ).strip()
+    # Build prompt lists
+    mem_prompts, gen_prompts = [], []
+    gold_mem_targets, gold_gen_targets, task_labels = [], [], []
 
-            # Extract actual ground truth answer from p_mem_text and p_gen_text (after '\nAnswer:')
-            # For chaining & intersection, this equals target_entity ("invasive breast carcinoma", "STIM2").
-            # For fact_checking, this is "true" or "false" (while target_entity is the subject entity).
-            sep = "\nAnswer:"
-            p_mem_text = item.get("p_mem_text", "")
-            p_gen_text = item.get("p_gen_text", "")
+    for item in all_items:
+        task = item["task_type"]
+        p_mem_prompt = item.get("p_mem_prompt", item["p_mem_text"])
+        p_gen_prompt = item.get("p_gen_prompt", item["p_gen_text"])
+        mem_prompts.append(p_mem_prompt)
+        gen_prompts.append(p_gen_prompt)
 
-            mem_sep_pos = p_mem_text.rfind(sep)
-            gold_mem_target = p_mem_text[mem_sep_pos + len(sep):].strip() if mem_sep_pos != -1 else item["target_entity"]
+        # Gold targets: read from text after \nAnswer:
+        p_mem_text = item.get("p_mem_text", "")
+        p_gen_text = item.get("p_gen_text", "")
+        mem_sep = p_mem_text.rfind(sep)
+        gen_sep = p_gen_text.rfind(sep)
+        gold_mem = p_mem_text[mem_sep + len(sep):].strip() if mem_sep != -1 else item["target_entity"]
+        gold_gen = p_gen_text[gen_sep + len(sep):].strip() if gen_sep != -1 else item["target_entity"]
+        gold_mem_targets.append(gold_mem)
+        gold_gen_targets.append(gold_gen)
+        task_labels.append(task)
 
-            gen_sep_pos = p_gen_text.rfind(sep)
-            gold_gen_target = p_gen_text[gen_sep_pos + len(sep):].strip() if gen_sep_pos != -1 else item["target_entity"]
+    # Batched generation
+    pred_mems = _batched_generate(mem_prompts)
+    pred_gens  = _batched_generate(gen_prompts)
 
-            mem_is_correct = relaxed_match(pred_mem, gold_mem_target)
-            gen_is_correct = relaxed_match(pred_gen, gold_gen_target)
-
-            if task in task_stats:
-                task_stats[task]["total"] += 1
-                if mem_is_correct:
-                    task_stats[task]["mem_correct"] += 1
-                if gen_is_correct:
-                    task_stats[task]["gen_correct"] += 1
+    # Score
+    for task, pred_mem, gold_mem, pred_gen, gold_gen in zip(
+        task_labels, pred_mems, gold_mem_targets, pred_gens, gold_gen_targets
+    ):
+        if task not in task_stats:
+            continue
+        task_stats[task]["total"] += 1
+        if relaxed_match(pred_mem, gold_mem):
+            task_stats[task]["mem_correct"] += 1
+        if relaxed_match(pred_gen, gold_gen):
+            task_stats[task]["gen_correct"] += 1
 
     results = {}
     for task, stat in task_stats.items():
@@ -136,8 +143,8 @@ def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda"):
         acc_gen = stat["gen_correct"] / tot
         results[f"eval/acc_mem_{task}"] = acc_mem
         results[f"eval/acc_gen_{task}"] = acc_gen
-        results[f"eval/ku_gap_{task}"] = acc_mem - acc_gen
-        results[f"eval/total_{task}"] = stat["total"]
+        results[f"eval/ku_gap_{task}"]  = acc_mem - acc_gen
+        results[f"eval/total_{task}"]   = stat["total"]
 
     return results
 

@@ -12,7 +12,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --mem=80G
-#SBATCH --time=01:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=outputs/logs/fast_eval_%j.out
 #SBATCH --error=outputs/logs/fast_eval_%j.err
 
