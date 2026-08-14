@@ -82,6 +82,13 @@ def verify_fact_checking(completion: str, target_label: str) -> float:
     ans = extract_answer_text(completion).lower().strip()
     norm_tgt = target_label.lower().strip()
 
+    # If target_label is not a valid boolean, normalize or fallback
+    if norm_tgt not in ["true", "false"]:
+        if "true" in norm_tgt:
+            norm_tgt = "true"
+        elif "false" in norm_tgt:
+            norm_tgt = "false"
+
     # Match first valid boolean token
     pred_bool = None
     first_word = ans.split()[0] if ans.split() else ""
@@ -106,19 +113,52 @@ def verify_fact_checking(completion: str, target_label: str) -> float:
     return 0.0
 
 
-def compute_verifiable_reward(completion: str, target_entity: str, task_type: str) -> float:
+def compute_verifiable_reward(
+    completion: str,
+    target_entity: str,
+    task_type: str,
+    bridge_entity: str = "",
+    chain_hops: list = None,
+    fc_label: str = ""
+) -> float:
     """
-    Main entry point for computing verifiable RLVR reward R in {0.0, 1.0}.
+    Main entry point for computing verifiable RLVR reward with step-wise breadcrumbs.
     
-    Args:
-        completion: The generated model response text.
-        target_entity: Ground truth entity or boolean label.
-        task_type: 'chaining', 'intersection', or 'fact_checking'.
-    
-    Returns:
-        1.0 if candidate is verifiably correct, 0.0 otherwise.
+    Reward Tiers:
+      - Chaining:
+          * Target Entity (Final Hop) Match:       R = 1.00
+          * Bridge Entity (Hop 1/2 Intermediate):  R = 0.50
+          * Intermediate Entity in chain_hops:     R = 0.25
+          * Off-path / Hallucination:              R = 0.00
+      - Intersection:
+          * Target Entity Match:                   R = 1.00
+          * Mismatch:                              R = 0.00
+      - Fact Checking:
+          * Correct Boolean (fc_label):            R = 1.00
+          * Incorrect Boolean:                     R = 0.00
     """
     if task_type == "fact_checking":
-        return verify_fact_checking(completion, target_entity)
-    else:
-        return verify_entity_target(completion, target_entity)
+        label = fc_label if fc_label else target_entity
+        return verify_fact_checking(completion, label)
+
+    # 1. Check Full Target Match (1.00)
+    if verify_entity_target(completion, target_entity) > 0.0:
+        return 1.0
+
+    # 2. For Chaining, check Step-Wise Breadcrumb Rewards
+    if task_type == "chaining":
+        # 2a. Bridge Entity Match (0.50)
+        if bridge_entity and verify_entity_target(completion, bridge_entity) > 0.0:
+            return 0.50
+
+        # 2b. Intermediate Chain Hop Entity Match (0.25)
+        if chain_hops:
+            for hop in chain_hops:
+                # Hop format: "Entity1 --[rel]--> Entity2"
+                parts = re.split(r"\s+--\[.*?\]-->\s+", hop)
+                for ent in parts:
+                    ent = ent.strip()
+                    if ent and verify_entity_target(completion, ent) > 0.0:
+                        return 0.25
+
+    return 0.0

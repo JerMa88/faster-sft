@@ -61,11 +61,30 @@ def test_verify_fact_checking():
 
 
 def test_compute_verifiable_reward():
-    assert compute_verifiable_reward("Tamoxifen", "tamoxifen", "chaining") == 1.0
+    # 1. Chaining Target Match (1.00)
+    assert compute_verifiable_reward("Resolved sideband cooling", "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 1.0
+
+    # 2. Chaining Bridge Match (0.50)
+    assert compute_verifiable_reward("Laser cooling of solids", "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 0.50
+
+    # 3. Chaining Intermediate Hop Match (0.25)
+    hops = [
+        "Ross S. Fontenot --[writes]--> Measuring CdSe quantum dots",
+        "Measuring CdSe quantum dots --[cites]--> Laser cooling of solids"
+    ]
+    assert compute_verifiable_reward("Measuring CdSe quantum dots", "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids", chain_hops=hops) == 0.25
+
+    # 4. Chaining Off-path Hallucination (0.00)
+    assert compute_verifiable_reward("Completely Unrelated Hallucination", "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids", chain_hops=hops) == 0.0
+
+    # 5. Intersection Exact Match (1.00) vs Mismatch (0.00)
     assert compute_verifiable_reward("Tamoxifen", "tamoxifen", "intersection") == 1.0
-    assert compute_verifiable_reward("True", "true", "fact_checking") == 1.0
-    assert compute_verifiable_reward("False", "true", "fact_checking") == 0.0
-    assert compute_verifiable_reward("Wrong Entity", "tamoxifen", "chaining") == 0.0
+    assert compute_verifiable_reward("Wrong Entity", "tamoxifen", "intersection") == 0.0
+
+    # 6. Fact Checking with fc_label
+    assert compute_verifiable_reward("Answer: false", "Random Entity Name", "fact_checking", fc_label="false") == 1.0
+    assert compute_verifiable_reward("The statement is true.", "Random Entity Name", "fact_checking", fc_label="true") == 1.0
+    assert compute_verifiable_reward("Answer: true", "Random Entity Name", "fact_checking", fc_label="false") == 0.0
 
 
 if __name__ == "__main__":
@@ -74,4 +93,4 @@ if __name__ == "__main__":
     test_verify_entity_target()
     test_verify_fact_checking()
     test_compute_verifiable_reward()
-    print("All RLVR verifier unit tests passed successfully!")
+    print("All updated RLVR verifier unit tests passed successfully!")
