@@ -3,7 +3,7 @@
 Figure 7 Replication Plotter (Dai et al., 2025)
 ===============================================
 Plots the 3-panel SFT training dynamics (Memorization vs. Generalization)
-across 50 epochs:
+across 50 epochs with per-epoch training gradient norm on a secondary axis:
   - Panel 1: Chaining      (A_mem -> 98.9%, A_gen -> 3.4%, persistent KU-gap)
   - Panel 2: Intersection  (A_mem -> 92.4%, A_gen -> 93.5%, parallel convergence)
   - Panel 3: Fact Checking (A_mem -> 100.0%, A_gen -> 52.6%, ~0.50 binary baseline)
@@ -13,11 +13,12 @@ Outputs are saved directly to ./figures/ as both high-resolution PNG and PDF.
 Usage:
   python scripts/plotting/plot_figure7_replication.py
   python scripts/plotting/plot_figure7_replication.py --log outputs/logs/fast_eval_475392.out
-  python scripts/plotting/plot_figure7_replication.py --theme light --out figures/figure7_paper.png
+  python scripts/plotting/plot_figure7_replication.py --theme light --out figures/figure7.png
 """
 
 import os
 import re
+import json
 import glob
 import argparse
 import numpy as np
@@ -46,6 +47,44 @@ def find_latest_log() -> str:
         logs.sort(key=os.path.getmtime, reverse=True)
         return logs[0]
     return "outputs/logs/fast_eval_475392.out"
+
+
+def load_training_gradient_stats() -> dict:
+    """Load per-epoch training gradient norm and loss stats."""
+    cache_path = "outputs/metrics/epoch_training_stats.json"
+    if os.path.exists(cache_path):
+        with open(cache_path, "r") as f:
+            data = json.load(f)
+            return {int(k): v for k, v in data.items()}
+
+    # Try fetching from W&B if available
+    try:
+        import wandb
+        import pandas as pd
+        api = wandb.Api()
+        run = api.run("jerma88-smu/kug_overhaul_qwen1.5b/c39m3zuh")
+        history = list(run.scan_history())
+        df = pd.DataFrame(history)
+        steps_per_epoch = 70
+        epoch_stats = {}
+        for ep in range(1, 51):
+            start_step = (ep - 1) * steps_per_epoch + 1
+            end_step = ep * steps_per_epoch
+            ep_df = df[(df["step"] >= start_step) & (df["step"] <= end_step)]
+            if not ep_df.empty and "train/grad_norm" in ep_df:
+                epoch_stats[ep] = {
+                    "grad_norm": float(ep_df["train/grad_norm"].mean()),
+                    "loss": float(ep_df["train/step_loss_total"].mean()),
+                }
+        if epoch_stats:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, "w") as f:
+                json.dump(epoch_stats, f, indent=2)
+            return epoch_stats
+    except Exception as e:
+        print(f"Warning: Could not fetch training gradient stats from W&B: {e}")
+
+    return {}
 
 
 def parse_eval_log(log_path: str) -> dict:
@@ -99,10 +138,10 @@ def parse_eval_log(log_path: str) -> dict:
     return results
 
 
-def plot_figure7(results: dict, out_path: str, theme: str = "light", title_suffix: str = ""):
+def plot_figure7(results: dict, train_stats: dict, out_path: str, theme: str = "light", title_suffix: str = ""):
     """
-    Generate 3-panel Figure 7 matching paper publication style.
-    theme: 'light' (white publication style) or 'dark' (sleek presentation style)
+    Generate 3-panel Figure 7 matching paper publication style,
+    with training gradient norm plotted at every epoch on secondary axis.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,11 +156,12 @@ def plot_figure7(results: dict, out_path: str, theme: str = "light", title_suffi
         bg_fig = "#0F1117"
         bg_ax = "#1A1D27"
         text_color = "#FFFFFF"
-        subtext_color = "#A0A5B5"
+        subtext_color = "#94A3B8"
         grid_color = "#2E3346"
         spine_color = "#3A3D4A"
-        color_mem = "#3B82F6"   # Bright Blue
-        color_gen = "#EF4444"   # Bright Red
+        color_mem = "#3B82F6"      # Bright Blue
+        color_gen = "#EF4444"      # Bright Red
+        color_grad = "#A855F7"     # Vibrant Purple for Gradient
         fill_color = "#3B82F6"
         legend_bg = "#222634"
         legend_edge = "#3A3D4A"
@@ -132,15 +172,16 @@ def plot_figure7(results: dict, out_path: str, theme: str = "light", title_suffi
         subtext_color = "#475569"
         grid_color = "#E2E8F0"
         spine_color = "#CBD5E1"
-        color_mem = "#1E40AF"   # Deep Navy Blue
-        color_gen = "#DC2626"   # Crimson Red
+        color_mem = "#1D4ED8"      # Deep Royal Blue
+        color_gen = "#DC2626"      # Crimson Red
+        color_grad = "#7C3AED"     # Purple Gradient Norm
         fill_color = "#93C5FD"
         legend_bg = "#FFFFFF"
         legend_edge = "#E2E8F0"
 
-    fig = plt.figure(figsize=(16, 5.2))
+    fig = plt.figure(figsize=(17, 5.5))
     fig.patch.set_facecolor(bg_fig)
-    gs = gridspec.GridSpec(1, 3, figure=fig, wspace=0.28)
+    gs = gridspec.GridSpec(1, 3, figure=fig, wspace=0.35)
 
     for col, task in enumerate(TASK_ORDER):
         ax = fig.add_subplot(gs[0, col])
@@ -158,31 +199,61 @@ def plot_figure7(results: dict, out_path: str, theme: str = "light", title_suffi
         m = np.array(mem)
         g = np.array(gen)
 
-        # Decoupling shade (area between A_mem and A_gen)
-        ax.fill_between(ep, g, m, alpha=0.15 if theme == "light" else 0.12, color=fill_color, label="_nolegend_")
+        # 1. Gradient Shading (Area between A_mem and A_gen)
+        ax.fill_between(ep, g, m, alpha=0.16 if theme == "light" else 0.13, color=fill_color, label="_nolegend_")
 
-        # Main curve plots
-        ax.plot(
+        # 2. Main Accuracy Curves
+        l1, = ax.plot(
             ep, m, color=color_mem, linewidth=2.8,
             label=r"Memorization ($A_{mem}$)",
-            marker="o", markersize=4.5, markevery=max(1, len(ep) // 10)
+            marker="o", markersize=4.5, markevery=max(1, len(ep) // 10),
+            zorder=4
         )
-        ax.plot(
+        l2, = ax.plot(
             ep, g, color=color_gen, linewidth=2.8,
             label=r"Generalization ($A_{gen}$)",
-            marker="s", markersize=4.5, markevery=max(1, len(ep) // 10)
+            marker="s", markersize=4.5, markevery=max(1, len(ep) // 10),
+            zorder=4
         )
 
-        # Paper Target Reference Lines
+        # 3. Paper Target Reference Lines
         pt = PAPER_TARGETS[task]
-        ax.axhline(
+        l3 = ax.axhline(
             pt["mem"], color=color_mem, linestyle="--", linewidth=1.2,
-            alpha=0.6, label=f"Paper $A_{{mem}}$ Target ({pt['mem']:.0%})"
+            alpha=0.55, label=f"Paper $A_{{mem}}$ Target ({pt['mem']:.0%})",
+            zorder=3
         )
-        ax.axhline(
+        l4 = ax.axhline(
             pt["gen"], color=color_gen, linestyle="--", linewidth=1.2,
-            alpha=0.6, label=f"Paper $A_{{gen}}$ Target ({pt['gen']:.0%})"
+            alpha=0.55, label=f"Paper $A_{{gen}}$ Target ({pt['gen']:.0%})",
+            zorder=3
         )
+
+        # 4. Secondary Right Axis: Training Gradient Norm across epochs
+        ax2 = ax.twinx()
+        ax2.set_facecolor("none")
+        grad_epochs = [e for e in ep if e in train_stats]
+        grad_norms = [train_stats[e]["grad_norm"] for e in grad_epochs]
+
+        if grad_epochs:
+            l5, = ax2.plot(
+                grad_epochs, grad_norms, color=color_grad, linestyle=":",
+                linewidth=1.8, alpha=0.85, marker="^", markersize=3.5,
+                markevery=max(1, len(grad_epochs) // 8),
+                label=r"Training Gradient $\|\nabla \mathcal{L}\|_2$",
+                zorder=2
+            )
+            ax2.set_ylim(0, max(3.5, max(grad_norms) * 1.25 if grad_norms else 3.5))
+            ax2.tick_params(colors=color_grad, labelsize=9)
+            ax2.spines["right"].set_color(color_grad)
+            ax2.spines["right"].set_linewidth(1.0)
+            ax2.spines["left"].set_color(spine_color)
+            ax2.spines["top"].set_color(spine_color)
+            ax2.spines["bottom"].set_color(spine_color)
+            if col == 2:
+                ax2.set_ylabel(r"Gradient Norm $\|\nabla \mathcal{L}\|_2$", color=color_grad, fontsize=11, fontweight="bold", labelpad=6)
+        else:
+            l5 = None
 
         # Final Epoch Values Annotation
         if len(ep) > 0:
@@ -190,7 +261,6 @@ def plot_figure7(results: dict, out_path: str, theme: str = "light", title_suffi
             last_m = m[-1]
             last_g = g[-1]
 
-            # Offset logic for clear text placement
             m_offset_y = 0.04 if last_m >= last_g else -0.07
             g_offset_y = -0.08 if last_m >= last_g else 0.04
             if abs(last_m - last_g) < 0.05:
@@ -200,48 +270,53 @@ def plot_figure7(results: dict, out_path: str, theme: str = "light", title_suffi
             ax.annotate(
                 f"{last_m:.1%}",
                 xy=(final_ep, last_m),
-                xytext=(final_ep - 4, min(1.02, max(0.0, last_m + m_offset_y))),
+                xytext=(final_ep - 4.5, min(1.02, max(0.0, last_m + m_offset_y))),
                 color=color_mem, fontsize=9.5, fontweight="bold",
                 arrowprops=dict(arrowstyle="->", color=color_mem, lw=1.0)
             )
             ax.annotate(
                 f"{last_g:.1%}",
                 xy=(final_ep, last_g),
-                xytext=(final_ep - 4, min(1.02, max(0.0, last_g + g_offset_y))),
+                xytext=(final_ep - 4.5, min(1.02, max(0.0, last_g + g_offset_y))),
                 color=color_gen, fontsize=9.5, fontweight="bold",
                 arrowprops=dict(arrowstyle="->", color=color_gen, lw=1.0)
             )
 
-        # Styling
+        # Primary Axis Styling
         ax.set_xlim(0, max(ep) + 1)
         ax.set_ylim(-0.03, 1.06)
-        ax.set_xlabel("Epoch", color=text_color, fontsize=12, fontweight="bold", labelpad=6)
+        ax.set_xlabel("Epoch", color=text_color, fontsize=11.5, fontweight="bold", labelpad=5)
         if col == 0:
-            ax.set_ylabel("Accuracy", color=text_color, fontsize=12, fontweight="bold", labelpad=6)
+            ax.set_ylabel("Accuracy", color=text_color, fontsize=11.5, fontweight="bold", labelpad=5)
 
         title = pt["label"]
-        ax.set_title(f"Task {chr(65+col)}: {title}", color=text_color, fontsize=13, fontweight="bold", pad=10)
+        ax.set_title(f"Task {chr(65+col)}: {title}", color=text_color, fontsize=12.5, fontweight="bold", pad=9)
 
-        # Grid and spines
-        ax.grid(True, linestyle="--", linewidth=0.7, color=grid_color, alpha=0.8)
+        # Grid and Spines
+        ax.grid(True, linestyle="--", linewidth=0.6, color=grid_color, alpha=0.75)
         ax.set_axisbelow(True)
-        ax.tick_params(colors=text_color, labelsize=10)
+        ax.tick_params(colors=text_color, labelsize=9.5)
         for spine in ax.spines.values():
             spine.set_color(spine_color)
             spine.set_linewidth(1.0)
 
-        # Legend
+        # Unified Legend
+        lines = [l1, l2, l3, l4]
+        if l5 is not None:
+            lines.append(l5)
+        labels = [l.get_label() for l in lines]
         ax.legend(
-            fontsize=8.5, loc="lower right" if col != 1 else "center right",
-            framealpha=0.9, facecolor=legend_bg, edgecolor=legend_edge,
+            lines, labels, fontsize=8.0,
+            loc="lower right" if col != 1 else "center right",
+            framealpha=0.92, facecolor=legend_bg, edgecolor=legend_edge,
             labelcolor=text_color
         )
 
-    # Super title
+    # Super Title
     fig.suptitle(
-        f"Figure 7 Replication — Standard SFT Training Dynamics (Qwen2.5-1.5B on STaRK)\n"
-        f"Memorization ($A_{{mem}}$) vs. Generalization ($A_{{gen}}$) across 50 Epochs{title_suffix}",
-        color=text_color, fontsize=14, fontweight="bold", y=1.03
+        r"Figure 7 Replication — SFT Training Dynamics & Gradient Norm (Qwen2.5-1.5B on STaRK)" + "\n" +
+        r"Memorization ($A_{mem}$), Generalization ($A_{gen}$), and Gradient Norm $\|\nabla \mathcal{L}\|_2$ across 50 Epochs" + title_suffix,
+        color=text_color, fontsize=13.5, fontweight="bold", y=1.03
     )
 
     # Save PNG & PDF
@@ -256,35 +331,10 @@ def plot_figure7(results: dict, out_path: str, theme: str = "light", title_suffi
     print(f"  Saved Vector PDF    -> {pdf_path}")
 
 
-def print_summary_table(results: dict):
-    """Print clean ASCII table of the replication metrics."""
-    print("\n" + "=" * 78)
-    print("  FIGURE 7 REPLICATION SUMMARY (Qwen2.5-1.5B Baseline SFT)")
-    print("=" * 78)
-    print(f"  {'Task':<16} | {'Final A_mem':<12} | {'Final A_gen':<12} | {'KU Gap':<10} | {'Paper Target':<18}")
-    print("-" * 78)
-
-    targets = {
-        "chaining": "A_mem>95%, A_gen<5%",
-        "intersection": "A_mem~92%, A_gen~90%",
-        "fact_checking": "A_mem~100%, A_gen~50%",
-    }
-
-    for task in TASK_ORDER:
-        ep = results[task]["epoch"]
-        if ep:
-            last_m = results[task]["mem"][-1]
-            last_g = results[task]["gen"][-1]
-            gap = last_m - last_g
-            label = PAPER_TARGETS[task]["label"]
-            print(f"  {label:<16} | {last_m:>10.1%}   | {last_g:>10.1%}   | {gap:>+8.1%}   | {targets[task]:<18}")
-    print("=" * 78 + "\n")
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Recreate Figure 7 replication plot using matplotlib.")
+    parser = argparse.ArgumentParser(description="Recreate Figure 7 replication plot with per-epoch gradient norm.")
     parser.add_argument("--log", type=str, default=None, help="Path to fast_eval log. Defaults to latest.")
-    parser.add_argument("--out", type=str, default="figures/figure7_sft_replication.png", help="Output PNG path.")
+    parser.add_argument("--out", type=str, default="figures/figure7.png", help="Output PNG path.")
     parser.add_argument("--theme", type=str, default="all", choices=["light", "dark", "all"],
                         help="Plot style theme: light (paper white), dark (sleek dark mode), or all.")
     args = parser.parse_args()
@@ -295,24 +345,23 @@ def main():
     total_epochs = max(len(v["epoch"]) for v in results.values())
     print(f"Found {total_epochs} evaluated epochs across {len(results)} tasks.")
 
-    print_summary_table(results)
+    train_stats = load_training_gradient_stats()
+    print(f"Loaded training gradient stats for {len(train_stats)} epochs.")
 
     out_base = Path(args.out)
 
     if args.theme in ["light", "all"]:
-        light_path = out_base.parent / f"{out_base.stem}.png" if args.theme == "light" else out_base.parent / "figure7_sft_replication.png"
-        print(f"Generating Publication (Light) Figure 7...")
-        plot_figure7(results, light_path, theme="light")
-
-        # Also create standard figure7.png/pdf in figures/
-        plot_figure7(results, out_base.parent / "figure7.png", theme="light")
+        light_path = out_base.parent / f"{out_base.stem}.png" if args.theme == "light" else out_base.parent / "figure7.png"
+        print(f"Generating Publication (Light) Figure 7 with Gradient Norm...")
+        plot_figure7(results, train_stats, light_path, theme="light")
+        plot_figure7(results, train_stats, out_base.parent / "figure7_sft_replication.png", theme="light")
 
     if args.theme in ["dark", "all"]:
-        dark_path = out_base.parent / f"{out_base.stem}_dark.png" if args.theme == "dark" else out_base.parent / "figure7_sft_v5.png"
-        print(f"Generating Dark-Theme Figure 7...")
-        plot_figure7(results, dark_path, theme="dark")
+        dark_path = out_base.parent / "figure7_sft_v5.png"
+        print(f"Generating Dark-Theme Figure 7 with Gradient Norm...")
+        plot_figure7(results, train_stats, dark_path, theme="dark")
 
-    print("All Figure 7 replication figures successfully generated in ./figures/!")
+    print("All Figure 7 plots with per-epoch gradient norm successfully updated in ./figures/!")
 
 
 if __name__ == "__main__":
