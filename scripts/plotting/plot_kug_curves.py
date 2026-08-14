@@ -214,9 +214,15 @@ def plot_kug_gap_comparison(eval_data_dict, output_path="figures/kug_gap_compari
 
 def main():
     dirs = {
-        "baseline": "outputs/kug_overhaul/baseline_qwen2.5-1.5b",
-        "two_stage": "outputs/kug_overhaul/two_stage_qwen2.5-1.5b",
-        "joint": "outputs/kug_overhaul/joint_qwen2.5-1.5b"
+        "baseline": "outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b",
+        "two_stage": "outputs/kug_overhaul_v2/two_stage_qwen2.5-1.5b",
+        "joint": "outputs/kug_overhaul_v2/joint_qwen2.5-1.5b"
+    }
+
+    log_map = {
+        "baseline": "outputs/logs/fast_eval_475392.out",
+        "two_stage": "outputs/logs/fast_eval_475475.out",
+        "joint": "outputs/logs/fast_eval_475516.out"
     }
 
     eval_data = {}
@@ -228,17 +234,15 @@ def main():
         print(f"Processing {key} (Run ID: {run_id})...")
 
         merged = {}
-        # 1. Parse log files first
-        log_matches = sorted(glob.glob(f"outputs/logs/*eval*{key}*.out"))
-        for log_path in log_matches:
-            data_log = parse_eval_log(log_path)
+        # 1. Parse log file
+        log_file = log_map.get(key)
+        if log_file and os.path.exists(log_file):
+            data_log = parse_eval_log(log_file)
             for ep, metrics in data_log.items():
-                if ep not in merged:
-                    merged[ep] = {}
-                merged[ep].update(metrics)
+                merged[ep] = metrics
 
-        # 2. Merge W&B API data
-        if run_id:
+        # 2. Merge W&B API data if needed
+        if len(merged) < 50 and run_id:
             data_wandb = fetch_wandb_history(run_id, project=project)
             for ep, metrics in data_wandb.items():
                 if ep not in merged:

@@ -49,9 +49,9 @@ def find_latest_log() -> str:
     return "outputs/logs/fast_eval_475392.out"
 
 
-def load_training_gradient_stats() -> dict:
+def load_training_gradient_stats(custom_path: str = None) -> dict:
     """Load per-epoch training gradient norm and loss stats."""
-    cache_path = "outputs/metrics/epoch_training_stats.json"
+    cache_path = custom_path or "outputs/metrics/epoch_training_stats.json"
     if os.path.exists(cache_path):
         with open(cache_path, "r") as f:
             data = json.load(f)
@@ -138,7 +138,15 @@ def parse_eval_log(log_path: str) -> dict:
     return results
 
 
-def plot_figure7(results: dict, train_stats: dict, out_path: str, theme: str = "light", title_suffix: str = ""):
+def plot_figure7(
+    results: dict,
+    train_stats: dict,
+    out_path: str,
+    theme: str = "light",
+    title_suffix: str = "",
+    stage_split: int = None,
+    main_title: str = None,
+):
     """
     Generate 3-panel Figure 7 matching paper publication style,
     with training gradient norm plotted at every epoch on secondary axis.
@@ -156,25 +164,23 @@ def plot_figure7(results: dict, train_stats: dict, out_path: str, theme: str = "
         bg_fig = "#0F1117"
         bg_ax = "#1A1D27"
         text_color = "#FFFFFF"
-        subtext_color = "#94A3B8"
         grid_color = "#2E3346"
         spine_color = "#3A3D4A"
-        color_mem = "#3B82F6"      # Bright Blue
-        color_gen = "#EF4444"      # Bright Red
-        color_grad = "#A855F7"     # Vibrant Purple for Gradient
+        color_mem = "#3B82F6"
+        color_gen = "#EF4444"
+        color_grad = "#A855F7"
         fill_color = "#3B82F6"
         legend_bg = "#222634"
         legend_edge = "#3A3D4A"
-    else:  # light (clean publication style)
+    else:
         bg_fig = "#FFFFFF"
         bg_ax = "#F8FAFC"
         text_color = "#0F172A"
-        subtext_color = "#475569"
         grid_color = "#E2E8F0"
         spine_color = "#CBD5E1"
-        color_mem = "#1D4ED8"      # Deep Royal Blue
-        color_gen = "#DC2626"      # Crimson Red
-        color_grad = "#7C3AED"     # Purple Gradient Norm
+        color_mem = "#1D4ED8"
+        color_gen = "#DC2626"
+        color_grad = "#7C3AED"
         fill_color = "#93C5FD"
         legend_bg = "#FFFFFF"
         legend_edge = "#E2E8F0"
@@ -199,127 +205,92 @@ def plot_figure7(results: dict, train_stats: dict, out_path: str, theme: str = "
         m = np.array(mem)
         g = np.array(gen)
 
-        # 1. Gradient Shading (Area between A_mem and A_gen)
         ax.fill_between(ep, g, m, alpha=0.16 if theme == "light" else 0.13, color=fill_color, label="_nolegend_")
 
-        # 2. Main Accuracy Curves
-        l1, = ax.plot(
-            ep, m, color=color_mem, linewidth=2.8,
-            label=r"Memorization ($A_{mem}$)",
-            marker="o", markersize=4.5, markevery=max(1, len(ep) // 10),
-            zorder=4
-        )
-        l2, = ax.plot(
-            ep, g, color=color_gen, linewidth=2.8,
-            label=r"Generalization ($A_{gen}$)",
-            marker="s", markersize=4.5, markevery=max(1, len(ep) // 10),
-            zorder=4
-        )
+        l1, = ax.plot(ep, m, color=color_mem, linewidth=2.8, label=r"Memorization ($A_{mem}$)", marker="o", markersize=4.5, markevery=max(1, len(ep) // 10), zorder=4)
+        l2, = ax.plot(ep, g, color=color_gen, linewidth=2.8, label=r"Generalization ($A_{gen}$)", marker="s", markersize=4.5, markevery=max(1, len(ep) // 10), zorder=4)
 
-        # 3. Paper Target Reference Lines
         pt = PAPER_TARGETS[task]
-        l3 = ax.axhline(
-            pt["mem"], color=color_mem, linestyle="--", linewidth=1.2,
-            alpha=0.55, label=f"Paper $A_{{mem}}$ Target ({pt['mem']:.0%})",
-            zorder=3
-        )
-        l4 = ax.axhline(
-            pt["gen"], color=color_gen, linestyle="--", linewidth=1.2,
-            alpha=0.55, label=f"Paper $A_{{gen}}$ Target ({pt['gen']:.0%})",
-            zorder=3
-        )
+        l3 = ax.axhline(pt["mem"], color=color_mem, linestyle="--", linewidth=1.2, alpha=0.55, label=f"Paper $A_{{mem}}$ Target ({pt['mem']:.0%})", zorder=3)
+        l4 = ax.axhline(pt["gen"], color=color_gen, linestyle="--", linewidth=1.2, alpha=0.55, label=f"Paper $A_{{gen}}$ Target ({pt['gen']:.0%})", zorder=3)
 
-        # 4. Secondary Right Axis: Training Gradient Norm across epochs
+        l_split = None
+        if stage_split is not None:
+            l_split = ax.axvline(
+                x=stage_split, color="#F59E0B" if theme == "light" else "#FBBF24",
+                linestyle="-.", linewidth=1.5, alpha=0.9,
+                label=f"Stage Switch (Ep {stage_split})", zorder=3
+            )
+
         ax2 = ax.twinx()
         ax2.set_facecolor("none")
         grad_epochs = [e for e in ep if e in train_stats]
         grad_norms = [train_stats[e]["grad_norm"] for e in grad_epochs]
 
         if grad_epochs:
-            l5, = ax2.plot(
-                grad_epochs, grad_norms, color=color_grad, linestyle=":",
-                linewidth=1.8, alpha=0.85, marker="^", markersize=3.5,
-                markevery=max(1, len(grad_epochs) // 8),
-                label=r"Training Gradient $\|\nabla \mathcal{L}\|_2$",
-                zorder=2
-            )
+            l5, = ax2.plot(grad_epochs, grad_norms, color=color_grad, linestyle=":", linewidth=1.8, alpha=0.85, marker="^", markersize=3.5, markevery=max(1, len(grad_epochs) // 8), label=r"Training Gradient $\|\nabla \mathcal{L}\|_2$", zorder=2)
             ax2.set_ylim(0, max(3.5, max(grad_norms) * 1.25 if grad_norms else 3.5))
             ax2.tick_params(colors=color_grad, labelsize=9)
             ax2.spines["right"].set_color(color_grad)
-            ax2.spines["right"].set_linewidth(1.0)
-            ax2.spines["left"].set_color(spine_color)
-            ax2.spines["top"].set_color(spine_color)
-            ax2.spines["bottom"].set_color(spine_color)
             if col == 2:
                 ax2.set_ylabel(r"Gradient Norm $\|\nabla \mathcal{L}\|_2$", color=color_grad, fontsize=11, fontweight="bold", labelpad=6)
         else:
             l5 = None
 
-        # Final Epoch Values Annotation
         if len(ep) > 0:
             final_ep = ep[-1]
-            last_m = m[-1]
-            last_g = g[-1]
-
-            m_offset_y = 0.04 if last_m >= last_g else -0.07
-            g_offset_y = -0.08 if last_m >= last_g else 0.04
-            if abs(last_m - last_g) < 0.05:
-                m_offset_y = 0.05
-                g_offset_y = -0.08
-
-            ax.annotate(
-                f"{last_m:.1%}",
-                xy=(final_ep, last_m),
-                xytext=(final_ep - 4.5, min(1.02, max(0.0, last_m + m_offset_y))),
-                color=color_mem, fontsize=9.5, fontweight="bold",
-                arrowprops=dict(arrowstyle="->", color=color_mem, lw=1.0)
+            final_m = m[-1]
+            final_g = g[-1]
+            gap = final_m - final_g
+            annotation_text = (
+                f"Epoch {final_ep}\n"
+                f"$A_{{mem}}$: {final_m:.1%}\n"
+                f"$A_{{gen}}$: {final_g:.1%}\n"
+                rf"$\Delta A$: {gap:+.1%}"
             )
-            ax.annotate(
-                f"{last_g:.1%}",
-                xy=(final_ep, last_g),
-                xytext=(final_ep - 4.5, min(1.02, max(0.0, last_g + g_offset_y))),
-                color=color_gen, fontsize=9.5, fontweight="bold",
-                arrowprops=dict(arrowstyle="->", color=color_gen, lw=1.0)
+            ax.text(
+                0.03, 0.05, annotation_text,
+                transform=ax.transAxes,
+                fontsize=8.5,
+                fontweight="medium",
+                color=text_color,
+                bbox=dict(boxstyle="round,pad=0.35", facecolor=bg_ax, edgecolor=spine_color, alpha=0.9)
             )
 
-        # Primary Axis Styling
-        ax.set_xlim(0, max(ep) + 1)
-        ax.set_ylim(-0.03, 1.06)
-        ax.set_xlabel("Epoch", color=text_color, fontsize=11.5, fontweight="bold", labelpad=5)
+        task_title = PAPER_TARGETS[task]["label"]
+        ax.set_title(f"Task {chr(65+col)}: {task_title}", color=text_color, fontsize=13.0, fontweight="bold", pad=12)
+        ax.set_xlabel("Epochs", color=text_color, fontsize=11, fontweight="bold")
         if col == 0:
-            ax.set_ylabel("Accuracy", color=text_color, fontsize=11.5, fontweight="bold", labelpad=5)
+            ax.set_ylabel("Accuracy", color=text_color, fontsize=11, fontweight="bold")
+        ax.set_xlim(0, max(50, max(epochs)))
+        ax.set_ylim(-0.02, 1.05)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{int(y*100)}%"))
+        ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.7, color=grid_color)
 
-        title = pt["label"]
-        ax.set_title(f"Task {chr(65+col)}: {title}", color=text_color, fontsize=12.5, fontweight="bold", pad=9)
-
-        # Grid and Spines
-        ax.grid(True, linestyle="--", linewidth=0.6, color=grid_color, alpha=0.75)
-        ax.set_axisbelow(True)
+        for s in ax.spines.values():
+            s.set_color(spine_color)
+            s.set_linewidth(1.0)
         ax.tick_params(colors=text_color, labelsize=9.5)
-        for spine in ax.spines.values():
-            spine.set_color(spine_color)
-            spine.set_linewidth(1.0)
 
-        # Unified Legend
         lines = [l1, l2, l3, l4]
+        if l_split is not None:
+            lines.append(l_split)
         if l5 is not None:
             lines.append(l5)
         labels = [l.get_label() for l in lines]
         ax.legend(
-            lines, labels, fontsize=8.0,
+            lines, labels, fontsize=7.5,
             loc="lower right" if col != 1 else "center right",
             framealpha=0.92, facecolor=legend_bg, edgecolor=legend_edge,
             labelcolor=text_color
         )
 
-    # Super Title
-    fig.suptitle(
+    header = main_title or (
         r"Figure 7 Replication — SFT Training Dynamics & Gradient Norm (Qwen2.5-1.5B on STaRK)" + "\n" +
-        r"Memorization ($A_{mem}$), Generalization ($A_{gen}$), and Gradient Norm $\|\nabla \mathcal{L}\|_2$ across 50 Epochs" + title_suffix,
-        color=text_color, fontsize=13.5, fontweight="bold", y=1.03
+        r"Memorization ($A_{mem}$), Generalization ($A_{gen}$), and Gradient Norm $\|\nabla \mathcal{L}\|_2$ across 50 Epochs"
     )
+    fig.suptitle(header + title_suffix, color=text_color, fontsize=13.5, fontweight="bold", y=1.03)
 
-    # Save PNG & PDF
     png_path = str(out_path)
     pdf_path = str(out_path.with_suffix(".pdf"))
 
@@ -334,9 +305,12 @@ def plot_figure7(results: dict, train_stats: dict, out_path: str, theme: str = "
 def main():
     parser = argparse.ArgumentParser(description="Recreate Figure 7 replication plot with per-epoch gradient norm.")
     parser.add_argument("--log", type=str, default=None, help="Path to fast_eval log. Defaults to latest.")
+    parser.add_argument("--stats", type=str, default=None, help="Path to training gradient stats JSON.")
     parser.add_argument("--out", type=str, default="figures/figure7.png", help="Output PNG path.")
     parser.add_argument("--theme", type=str, default="all", choices=["light", "dark", "all"],
                         help="Plot style theme: light (paper white), dark (sleek dark mode), or all.")
+    parser.add_argument("--stage_split", type=int, default=None, help="Epoch where 2-stage switch occurs (e.g. 15).")
+    parser.add_argument("--title", type=str, default=None, help="Custom super title for figure.")
     args = parser.parse_args()
 
     log_path = args.log or find_latest_log()
@@ -345,23 +319,22 @@ def main():
     total_epochs = max(len(v["epoch"]) for v in results.values())
     print(f"Found {total_epochs} evaluated epochs across {len(results)} tasks.")
 
-    train_stats = load_training_gradient_stats()
+    train_stats = load_training_gradient_stats(args.stats)
     print(f"Loaded training gradient stats for {len(train_stats)} epochs.")
 
     out_base = Path(args.out)
 
     if args.theme in ["light", "all"]:
-        light_path = out_base.parent / f"{out_base.stem}.png" if args.theme == "light" else out_base.parent / "figure7.png"
+        light_path = out_base.parent / f"{out_base.stem}.png"
         print(f"Generating Publication (Light) Figure 7 with Gradient Norm...")
-        plot_figure7(results, train_stats, light_path, theme="light")
-        plot_figure7(results, train_stats, out_base.parent / "figure7_sft_replication.png", theme="light")
+        plot_figure7(results, train_stats, light_path, theme="light", stage_split=args.stage_split, main_title=args.title)
 
     if args.theme in ["dark", "all"]:
-        dark_path = out_base.parent / "figure7_sft_v5.png"
+        dark_path = out_base.parent / f"{out_base.stem}_dark.png"
         print(f"Generating Dark-Theme Figure 7 with Gradient Norm...")
-        plot_figure7(results, train_stats, dark_path, theme="dark")
+        plot_figure7(results, train_stats, dark_path, theme="dark", stage_split=args.stage_split, main_title=args.title)
 
-    print("All Figure 7 plots with per-epoch gradient norm successfully updated in ./figures/!")
+    print(f"All Figure 7 plots successfully saved for {out_base.stem} in ./figures/!")
 
 
 if __name__ == "__main__":

@@ -239,25 +239,19 @@ def train_kug(args):
             n_active_mem = (mem_labels != -100).sum().item()
             n_active_gen = (gen_labels != -100).sum().item()
 
+            loss_mem = torch.tensor(0.0, device="cuda")
+            loss_gen = torch.tensor(0.0, device="cuda")
+
+            # Sequential backward passes to free activation graph and prevent VRAM spikes
             if use_mem and n_active_mem > 0:
                 loss_mem = compute_completion_loss(model, mem_ids, mem_mask, mem_labels)
-            else:
-                loss_mem = torch.tensor(0.0, device="cuda")
+                (loss_mem / args.gradient_accumulation_steps).backward()
 
             if use_gen and n_active_gen > 0:
                 loss_gen = compute_completion_loss(model, gen_ids, gen_mask, gen_labels)
-            else:
-                loss_gen = torch.tensor(0.0, device="cuda")
+                (loss_gen / args.gradient_accumulation_steps).backward()
 
-            if args.method == "joint":
-                total_loss = loss_mem + loss_gen
-            elif use_mem:
-                total_loss = loss_mem
-            else:
-                total_loss = loss_gen
-
-            scaled_loss = total_loss / args.gradient_accumulation_steps
-            scaled_loss.backward()
+            total_loss = loss_mem + loss_gen
 
             epoch_loss_mem += loss_mem.item()
             epoch_loss_gen += loss_gen.item()
