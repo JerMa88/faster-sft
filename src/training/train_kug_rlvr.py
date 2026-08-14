@@ -285,25 +285,26 @@ def train_rlvr(args):
             response_mask = (generated_seqs[:, prompt_len:] != tokenizer.pad_token_id).float()
             num_response_tokens = response_mask.sum().clamp(min=1.0)
 
-            # 3. Forward pass under Policy Model (default adapter) -> token log probs
+            # 3. Forward pass under Policy Model (default adapter) -> completion token log probs
             model.set_adapter("default")
             policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask)
-            policy_logits = policy_outputs.logits[:, :-1, :]  # (B*K, L_total - 1, V)
-            target_ids = generated_seqs[:, 1:]                # (B*K, L_total - 1)
+            # Memory optimization: Slice logits ONLY for completion tokens (length <= 32) instead of entire prompt
+            policy_comp_logits = policy_outputs.logits[:, prompt_len - 1 : -1, :]
+            comp_targets = target_ids[:, prompt_len - 1 :]
+            policy_comp_log_probs = F.log_softmax(policy_comp_logits, dim=-1).gather(
+                dim=-1, index=comp_targets.unsqueeze(-1)
+            ).squeeze(-1)
+            del policy_outputs, policy_comp_logits
 
-            policy_log_probs = F.log_softmax(policy_logits, dim=-1)
-            policy_token_log_probs = policy_log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
-            # Slice completion log probs
-            policy_comp_log_probs = policy_token_log_probs[:, prompt_len - 1:]
-
-            # 4. Forward pass under Reference Model (reference adapter) -> ref token log probs
+            # 4. Forward pass under Reference Model (reference adapter) -> ref completion token log probs
             model.set_adapter("reference")
             with torch.no_grad():
                 ref_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask)
-                ref_logits = ref_outputs.logits[:, :-1, :]
-                ref_log_probs = F.log_softmax(ref_logits, dim=-1)
-                ref_token_log_probs = ref_log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
-                ref_comp_log_probs = ref_token_log_probs[:, prompt_len - 1:]
+                ref_comp_logits = ref_outputs.logits[:, prompt_len - 1 : -1, :]
+                ref_comp_log_probs = F.log_softmax(ref_comp_logits, dim=-1).gather(
+                    dim=-1, index=comp_targets.unsqueeze(-1)
+                ).squeeze(-1)
+                del ref_outputs, ref_comp_logits
 
             # Switch back to trainable policy adapter
             model.set_adapter("default")
@@ -400,8 +401,8 @@ def main():
     parser.add_argument("--wandb_project", type=str, default="kug_overhaul_qwen1.5b")
     parser.add_argument("--start_epoch", type=int, default=16)
     parser.add_argument("--end_epoch", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--num_rollouts", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top_p", type=float, default=0.95)

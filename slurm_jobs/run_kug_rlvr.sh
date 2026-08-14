@@ -19,8 +19,8 @@
 
 set -euo pipefail
 
-BATCH_SIZE="${1:-16}"
-GRAD_ACCUM="${2:-4}"
+BATCH_SIZE="${1:-8}"
+GRAD_ACCUM="${2:-8}"
 NUM_ROLLOUTS="${3:-8}"
 KL_BETA="${4:-0.04}"
 LR="${5:-5e-5}"
