@@ -97,18 +97,20 @@ def get_run_metadata(ckpt_dir):
 
 def plot_figure7_replication(eval_data_dict, output_path="figures/figure7_kug_curves_replication.png"):
     """
-    Plots Figure 7 replication with 3 panels:
+    Plots Figure 7 replication with 4 panels:
     Panel A: Method 1 (Baseline SFT)
-    Panel B: Method 2 (2-Stage Mem-then-Gen SFT)
+    Panel B: Method 2 (2-Stage Mem->Gen SFT)
     Panel C: Method 3 (Joint Supervised SFT)
+    Panel D: Method 4 (2-Stage RLVR with KL Anchor)
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), sharey=True)
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5.5), sharey=True)
 
     methods = [
         ("baseline", "Method 1: Baseline SFT ($P_{mem}$ only)", axes[0]),
-        ("two_stage", "Method 2: 2-Stage SFT (Mem $\\to$ Gen)", axes[1]),
-        ("joint", "Method 3: Joint Supervised SFT ($P_{mem} + P_{gen}$)", axes[2])
+        ("two_stage", "Method 2: 2-Stage SFT (Mem $\\to$ Gen SFT)", axes[1]),
+        ("joint", "Method 3: Joint Supervised ($P_{mem} + P_{gen}$)", axes[2]),
+        ("two_stage_rlvr", "Method 4: 2-Stage RLVR (Mem SFT $\\to$ RLVR)", axes[3])
     ]
 
     task_colors = {
@@ -128,7 +130,7 @@ def plot_figure7_replication(eval_data_dict, output_path="figures/figure7_kug_cu
         epochs = sorted(data.keys())
 
         if not epochs:
-            ax.set_title(f"{title}\n(Evaluating...)", fontsize=12, fontweight='bold')
+            ax.set_title(f"{title}\n(Evaluating...)", fontsize=11, fontweight='bold')
             ax.grid(True, linestyle='--', alpha=0.5)
             continue
 
@@ -140,22 +142,22 @@ def plot_figure7_replication(eval_data_dict, output_path="figures/figure7_kug_cu
             label = task_names[task]
 
             # Solid line for Memorization Accuracy
-            ax.plot(epochs, mem_accs, label=f"{label} ($A_{{mem}}$)", color=color, linestyle='-', linewidth=2.4)
+            ax.plot(epochs, mem_accs, label=f"{label} ($A_{{mem}}$)", color=color, linestyle='-', linewidth=2.2)
             # Dashed line for Generalization Accuracy
-            ax.plot(epochs, gen_accs, label=f"{label} ($A_{{gen}}$)", color=color, linestyle='--', linewidth=2.0, alpha=0.85)
+            ax.plot(epochs, gen_accs, label=f"{label} ($A_{{gen}}$)", color=color, linestyle='--', linewidth=1.9, alpha=0.85)
 
         # Add vertical line for 2-stage transition at epoch 15
-        if method_key == "two_stage":
-            ax.axvline(x=15, color='red', linestyle=':', linewidth=1.8, label='Loss Switch (Epoch 15)')
+        if method_key in ["two_stage", "two_stage_rlvr"]:
+            ax.axvline(x=15, color='red', linestyle=':', linewidth=1.8, label='Stage Switch (Ep 15)')
 
-        ax.set_title(title, fontsize=12, fontweight='bold', pad=10)
+        ax.set_title(title, fontsize=11, fontweight='bold', pad=10)
         ax.set_xlabel("Training Epochs", fontsize=11, fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.6)
         ax.set_xlim(1, max(50, max(epochs) if epochs else 50))
         ax.set_ylim(0, 105)
 
     axes[0].set_ylabel("Accuracy (%)", fontsize=12, fontweight='bold')
-    axes[0].legend(loc='upper left', fontsize=8, frameon=True)
+    axes[0].legend(loc='upper left', fontsize=7.5, frameon=True)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -167,12 +169,13 @@ def plot_kug_gap_comparison(eval_data_dict, output_path="figures/kug_gap_compari
     Plots direct Knowledge Understanding Gap (Delta A = A_mem - A_gen) across epochs for each method.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), sharey=True)
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5.5), sharey=True)
 
     methods = [
         ("baseline", "Method 1: Baseline SFT", axes[0]),
-        ("two_stage", "Method 2: 2-Stage SFT", axes[1]),
-        ("joint", "Method 3: Joint Supervised SFT", axes[2])
+        ("two_stage", "Method 2: 2-Stage SFT (Mem $\\to$ Gen)", axes[1]),
+        ("joint", "Method 3: Joint Supervised", axes[2]),
+        ("two_stage_rlvr", "Method 4: 2-Stage RLVR (Mem $\\to$ RLVR)", axes[3])
     ]
 
     task_colors = {
@@ -186,7 +189,7 @@ def plot_kug_gap_comparison(eval_data_dict, output_path="figures/kug_gap_compari
         epochs = sorted(data.keys())
 
         if not epochs:
-            ax.set_title(f"{title}\n(Evaluating...)", fontsize=12, fontweight='bold')
+            ax.set_title(f"{title}\n(Evaluating...)", fontsize=11, fontweight='bold')
             ax.grid(True, linestyle='--', alpha=0.5)
             continue
 
@@ -194,18 +197,18 @@ def plot_kug_gap_comparison(eval_data_dict, output_path="figures/kug_gap_compari
 
         for task in ["chaining", "intersection", "fact_checking"]:
             gaps = [data[e].get(f"eval/ku_gap_{task}", 0.0) * 100 for e in epochs]
-            ax.plot(epochs, gaps, label=task.replace("_", " ").title(), color=task_colors[task], linewidth=2.4)
+            ax.plot(epochs, gaps, label=task.replace("_", " ").title(), color=task_colors[task], linewidth=2.2)
 
-        if method_key == "two_stage":
-            ax.axvline(x=15, color='red', linestyle=':', linewidth=1.8, label='Loss Switch (Epoch 15)')
+        if method_key in ["two_stage", "two_stage_rlvr"]:
+            ax.axvline(x=15, color='red', linestyle=':', linewidth=1.8, label='Stage Switch (Ep 15)')
 
-        ax.set_title(title, fontsize=12, fontweight='bold', pad=10)
+        ax.set_title(title, fontsize=11, fontweight='bold', pad=10)
         ax.set_xlabel("Training Epochs", fontsize=11, fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.6)
         ax.set_xlim(1, max(50, max(epochs) if epochs else 50))
 
-    axes[0].set_ylabel("KUG Gap $\Delta A = A_{mem} - A_{gen}$ (%)", fontsize=12, fontweight='bold')
-    axes[0].legend(loc='upper right', fontsize=9, frameon=True)
+    axes[0].set_ylabel(r"KUG Gap $\Delta A = A_{mem} - A_{gen}$ (%)", fontsize=12, fontweight='bold')
+    axes[0].legend(loc='upper right', fontsize=8.5, frameon=True)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -216,13 +219,15 @@ def main():
     dirs = {
         "baseline": "outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b",
         "two_stage": "outputs/kug_overhaul_v2/two_stage_qwen2.5-1.5b",
-        "joint": "outputs/kug_overhaul_v2/joint_qwen2.5-1.5b"
+        "joint": "outputs/kug_overhaul_v2/joint_qwen2.5-1.5b",
+        "two_stage_rlvr": "outputs/kug_overhaul_v2/two_stage_rlvr_qwen2.5-1.5b"
     }
 
     log_map = {
         "baseline": "outputs/logs/fast_eval_475392.out",
         "two_stage": "outputs/logs/fast_eval_475475.out",
-        "joint": "outputs/logs/fast_eval_475516.out"
+        "joint": "outputs/logs/fast_eval_475516.out",
+        "two_stage_rlvr": "outputs/logs/fast_eval_475757.out"
     }
 
     eval_data = {}

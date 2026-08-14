@@ -225,15 +225,15 @@ def plot_figure7(
         ax2 = ax.twinx()
         ax2.set_facecolor("none")
         grad_epochs = [e for e in ep if e in train_stats]
-        grad_norms = [train_stats[e]["grad_norm"] for e in grad_epochs]
+        grad_norms = [train_stats[e].get("grad_norm", train_stats[e].get("loss_kl", train_stats[e].get("loss_total", 0.0))) for e in grad_epochs]
 
-        if grad_epochs:
-            l5, = ax2.plot(grad_epochs, grad_norms, color=color_grad, linestyle=":", linewidth=1.8, alpha=0.85, marker="^", markersize=3.5, markevery=max(1, len(grad_epochs) // 8), label=r"Training Gradient $\|\nabla \mathcal{L}\|_2$", zorder=2)
+        if grad_epochs and any(v > 0 for v in grad_norms):
+            l5, = ax2.plot(grad_epochs, grad_norms, color=color_grad, linestyle=":", linewidth=1.8, alpha=0.85, marker="^", markersize=3.5, markevery=max(1, len(grad_epochs) // 8), label=r"Training Dynamics ($\|\nabla \mathcal{L}\|_2$ / $\mathcal{L}_{KL}$)", zorder=2)
             ax2.set_ylim(0, max(3.5, max(grad_norms) * 1.25 if grad_norms else 3.5))
             ax2.tick_params(colors=color_grad, labelsize=9)
             ax2.spines["right"].set_color(color_grad)
             if col == 2:
-                ax2.set_ylabel(r"Gradient Norm $\|\nabla \mathcal{L}\|_2$", color=color_grad, fontsize=11, fontweight="bold", labelpad=6)
+                ax2.set_ylabel(r"Training Dynamics ($\|\nabla \mathcal{L}\|_2$ / $\mathcal{L}_{KL}$)", color=color_grad, fontsize=11, fontweight="bold", labelpad=6)
         else:
             l5 = None
 
