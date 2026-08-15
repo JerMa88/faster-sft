@@ -84,7 +84,7 @@ def main():
         print(f"Evaluating Epoch {epoch_num:02d}...", flush=True)
 
         model = PeftModel.from_pretrained(base_model, epoch_path)
-        eval_metrics = run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda")
+        eval_metrics = run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda", batch_size=128)
         eval_metrics["epoch"] = epoch_num
 
         for k, v in eval_metrics.items():
