@@ -388,10 +388,10 @@ def train_rlvr(args):
         })
 
         # Save per-epoch checkpoint
-        ckpt_dir = os.path.join(method_out_dir, f"checkpoint-epoch-{epoch}")
-        os.makedirs(ckpt_dir, exist_ok=True)
-        model.save_pretrained(ckpt_dir, selected_adapters=["default"])
-        tokenizer.save_pretrained(ckpt_dir)
+        ckpt_dir = out_dir / f"checkpoint-epoch-{epoch}"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(str(ckpt_dir), selected_adapters=["default"])
+        tokenizer.save_pretrained(str(ckpt_dir))
         print(f"Saved RLVR adapter checkpoint -> {ckpt_dir}")
 
     wandb.finish()
