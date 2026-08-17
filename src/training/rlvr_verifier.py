@@ -113,6 +113,37 @@ def verify_fact_checking(completion: str, target_label: str) -> float:
     return 0.0
 
 
+def split_cot_completion(completion: str) -> tuple:
+    """
+    Splits a candidate completion into (thought_text, answer_text).
+    Supports formats:
+      1. <think> thought </think> Answer: answer
+      2. Reasoning: thought \nAnswer: answer
+      3. Step 1: thought \nAnswer: answer
+      4. Plain answer (thought is empty string)
+    """
+    if not completion:
+        return "", ""
+
+    # Look for Answer: or Final Answer: separator
+    match = re.search(r"(?:</think>|\n|^)\s*(?:Answer|Final Answer):\s*", completion, re.IGNORECASE)
+    if match:
+        thought = completion[: match.start()].strip()
+        answer = completion[match.end() :].strip()
+        thought = re.sub(r"^<think>\s*", "", thought, flags=re.IGNORECASE).strip()
+        return thought, answer
+
+    # Fallback: check for explicit <think> ... </think> tags
+    think_match = re.search(r"<think>(.*?)</think>", completion, re.DOTALL | re.IGNORECASE)
+    if think_match:
+        thought = think_match.group(1).strip()
+        answer = completion[think_match.end() :].strip()
+        return thought, answer
+
+    # If no separator found, extract answer from text
+    return "", extract_answer_text(completion)
+
+
 def compute_verifiable_reward(
     completion: str,
     target_entity: str,
@@ -122,43 +153,66 @@ def compute_verifiable_reward(
     fc_label: str = ""
 ) -> float:
     """
-    Main entry point for computing verifiable RLVR reward with step-wise breadcrumbs.
+    Main entry point for computing verifiable RLVR reward with 2-Step CoT Scratchpad support.
     
     Reward Tiers:
-      - Chaining:
-          * Target Entity (Final Hop) Match:       R = 1.00
-          * Bridge Entity (Hop 1/2 Intermediate):  R = 0.50
-          * Intermediate Entity in chain_hops:     R = 0.25
-          * Off-path / Hallucination:              R = 0.00
-      - Intersection:
-          * Target Entity Match:                   R = 1.00
-          * Mismatch:                              R = 0.00
-      - Fact Checking:
-          * Correct Boolean (fc_label):            R = 1.00
-          * Incorrect Boolean:                     R = 0.00
+      - Chaining (Multi-hop Reasoning):
+          * 2-Step CoT Success (Bridge B in Thought + Target C in Answer): R = 1.00
+          * Direct Target Match (Target C in Answer):                       R = 0.80
+          * Step 1 CoT Reasoning (Bridge B in Thought):                     R = 0.40
+          * Partial Bridge Match (Bridge B in Answer):                      R = 0.30
+          * Intermediate Hop Match in Thought:                              R = 0.20
+          * Hallucination / Off-Path:                                       R = 0.00
+      - Intersection (Parallel Constraints):
+          * Target Entity in Answer:                                        R = 1.00
+          * Mismatch:                                                       R = 0.00
+      - Fact Checking (Binary Verification):
+          * Correct Boolean in Answer:                                      R = 1.00
+          * Incorrect Boolean:                                              R = 0.00
     """
+    thought, answer = split_cot_completion(completion)
+
     if task_type == "fact_checking":
         label = fc_label if fc_label else target_entity
-        return verify_fact_checking(completion, label)
+        return verify_fact_checking(answer if answer else completion, label)
 
-    # 1. Check Full Target Match (1.00)
-    if verify_entity_target(completion, target_entity) > 0.0:
-        return 1.0
+    # Intersection evaluation
+    if task_type == "intersection":
+        target_in_ans = verify_entity_target(answer, target_entity) > 0.0 or verify_entity_target(completion, target_entity) > 0.0
+        return 1.0 if target_in_ans else 0.0
 
-    # 2. For Chaining, check Step-Wise Breadcrumb Rewards
+    # Chaining (Multi-Hop) evaluation with 2-Step CoT Scratchpad
     if task_type == "chaining":
-        # 2a. Bridge Entity Match (0.50)
-        if bridge_entity and verify_entity_target(completion, bridge_entity) > 0.0:
-            return 0.50
+        norm_thought = normalize_text(thought)
+        norm_bridge = normalize_text(bridge_entity) if bridge_entity else ""
+        norm_target = normalize_text(target_entity) if target_entity else ""
 
-        # 2b. Intermediate Chain Hop Entity Match (0.25)
-        if chain_hops:
+        target_in_ans = verify_entity_target(answer, target_entity) > 0.0 or (norm_target and norm_target in normalize_text(answer))
+        bridge_in_thought = bool(norm_bridge and norm_thought and (norm_bridge in norm_thought or verify_entity_target(thought, bridge_entity) > 0.0))
+
+        # 1. Full 2-Step CoT Reasoning Solved (1.00)
+        if target_in_ans and bridge_in_thought:
+            return 1.00
+
+        # 2. Direct Target Match (0.80)
+        if target_in_ans or verify_entity_target(completion, target_entity) > 0.0:
+            return 0.80
+
+        # 3. Step 1 Bridge Solved in Thought Scratchpad (0.40)
+        if bridge_in_thought:
+            return 0.40
+
+        # 4. Model stopped at Bridge in Answer (0.30)
+        if bridge_entity and (verify_entity_target(answer, bridge_entity) > 0.0 or verify_entity_target(completion, bridge_entity) > 0.0):
+            return 0.30
+
+        # 5. Intermediate Hop Mention in Thought (0.20)
+        if chain_hops and norm_thought:
             for hop in chain_hops:
-                # Hop format: "Entity1 --[rel]--> Entity2"
                 parts = re.split(r"\s+--\[.*?\]-->\s+", hop)
                 for ent in parts:
-                    ent = ent.strip()
-                    if ent and verify_entity_target(completion, ent) > 0.0:
-                        return 0.25
+                    clean_ent = normalize_text(ent)
+                    if len(clean_ent) >= 3 and clean_ent in norm_thought:
+                        return 0.20
 
     return 0.0

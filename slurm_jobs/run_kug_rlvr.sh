@@ -24,10 +24,10 @@ GRAD_ACCUM="${2:-8}"
 NUM_ROLLOUTS="${3:-8}"
 KL_BETA="${4:-0.04}"
 LR="${5:-5e-5}"
-METHOD="${6:-two_stage_breadcrumb_rlvr}"
+METHOD="${6:-two_stage_cot_rlvr}"
 
 echo "================================================================"
-echo "  KUG 2-Stage Breadcrumb RLVR Training (GRPO with Breadcrumbs)"
+echo "  KUG 2-Stage CoT RLVR Training (GRPO with 2-Step Scratchpad)"
 echo "  Method:       ${METHOD}"
 echo "  Batch Size:   ${BATCH_SIZE}"
 echo "  Grad Accum:   ${GRAD_ACCUM}"
@@ -78,10 +78,11 @@ MONITOR_PID=$!
 trap "kill ${MONITOR_PID} 2>/dev/null || true; echo '=== Peak VRAM ==='; sort -t'|' -k2 -rn ${VRAM_LOG} | head -3" EXIT
 
 echo ""
-echo "--- Launching Breadcrumb RLVR Training (Epochs 16 to 50) ---"
+echo "--- Launching 2-Stage CoT RLVR Training (Epochs 16 to 50) ---"
 
 ${PYTHON} src/training/train_kug_rlvr.py \
     --method "${METHOD}" \
+    --use_cot \
     --model_name_or_path "Qwen/Qwen2.5-1.5B" \
     --init_checkpoint "${STAGE1_DIR}/checkpoint-epoch-15" \
     --dataset_path "data/processed/kug_dataset_all.jsonl" \
@@ -94,6 +95,7 @@ ${PYTHON} src/training/train_kug_rlvr.py \
     --num_rollouts "${NUM_ROLLOUTS}" \
     --temperature 0.85 \
     --top_p 0.95 \
+    --max_new_tokens 96 \
     --kl_beta "${KL_BETA}" \
     --learning_rate "${LR}"
 

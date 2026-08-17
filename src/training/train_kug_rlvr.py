@@ -50,23 +50,28 @@ class RLVRQueryDataset(Dataset):
     Dataset supplying prompt-only inputs for RLVR rollouts and target verification.
     """
 
-    def __init__(self, jsonl_path: str):
+    def __init__(self, jsonl_path: str, use_cot: bool = False):
         self.data = []
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     item = json.loads(line)
-                    # Extract prompt-only text for P_gen
+                    task_type = item.get("task_type", "chaining")
                     p_gen_full = item.get("p_gen", "")
                     sep_pos = p_gen_full.rfind(ANSWER_SEP)
-                    if sep_pos != -1:
-                        p_gen_prompt = p_gen_full[: sep_pos + len(ANSWER_SEP)]
+
+                    if use_cot and task_type == "chaining":
+                        query = p_gen_full[: sep_pos] if sep_pos != -1 else p_gen_full
+                        p_gen_prompt = f"{query}\nThought: "
                     else:
-                        p_gen_prompt = p_gen_full
+                        if sep_pos != -1:
+                            p_gen_prompt = p_gen_full[: sep_pos + len(ANSWER_SEP)]
+                        else:
+                            p_gen_prompt = p_gen_full
 
                     self.data.append({
                         "id": item.get("id", ""),
-                        "task_type": item.get("task_type", "chaining"),
+                        "task_type": task_type,
                         "p_gen_prompt": p_gen_prompt,
                         "target_entity": item.get("target_entity", ""),
                         "bridge_entity": item.get("bridge_entity", ""),
@@ -74,7 +79,7 @@ class RLVRQueryDataset(Dataset):
                         "fc_label": item.get("fc_label", ""),
                     })
 
-        print(f"[RLVRQueryDataset] Loaded {len(self.data)} prompts from {jsonl_path}")
+        print(f"[RLVRQueryDataset] Loaded {len(self.data)} prompts from {jsonl_path} (use_cot={use_cot})")
 
     def __len__(self) -> int:
         return len(self.data)
@@ -187,7 +192,7 @@ def train_rlvr(args):
     optimizer = AdamW(trainable_params, lr=args.learning_rate, weight_decay=args.weight_decay)
 
     # Dataloader
-    dataset = RLVRQueryDataset(args.dataset_path)
+    dataset = RLVRQueryDataset(args.dataset_path, use_cot=args.use_cot)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -252,7 +257,7 @@ def train_rlvr(args):
             completion_seqs = generated_seqs[:, prompt_len:]
             total_seq_len = generated_seqs.shape[1]
 
-            # Decode completions to text and compute verifiable rewards with step-wise breadcrumbs
+            # Decode completions to text and compute verifiable rewards with 2-Step CoT Scratchpad
             rewards = []
             for i in range(B * K):
                 prompt_idx = i // K
@@ -290,7 +295,7 @@ def train_rlvr(args):
             comp_targets = target_ids[:, prompt_len - 1 :]
             model.set_adapter("default")
             policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask)
-            # Memory optimization: Slice logits ONLY for completion tokens (length <= 32) instead of entire prompt
+            # Memory optimization: Slice logits ONLY for completion tokens instead of entire prompt
             policy_comp_logits = policy_outputs.logits[:, prompt_len - 1 : -1, :]
             policy_comp_log_probs = F.log_softmax(policy_comp_logits, dim=-1).gather(
                 dim=-1, index=comp_targets.unsqueeze(-1)
@@ -343,47 +348,47 @@ def train_rlvr(args):
                 optimizer.zero_grad()
                 global_step += 1
 
-                step_reward = sum(rewards) / len(rewards)
-                wandb.log({
-                    "step": global_step,
-                    "train/rlvr_step_reward": step_reward,
-                    "train/policy_loss": policy_loss.item(),
-                    "train/kl_loss": kl_loss.item(),
-                    "train/total_loss": total_loss.item(),
-                    "train/grad_norm": grad_norm,
-                })
+                step_reward = np.mean(rewards)
+                if global_step % 1 == 0:
+                    wandb.log({
+                        "train/total_loss": total_loss.item(),
+                        "train/policy_loss": policy_loss.item(),
+                        "train/kl_loss": kl_loss.item(),
+                        "train/rlvr_step_reward": step_reward,
+                        "train/grad_norm": grad_norm,
+                        "step": global_step,
+                    })
 
-        avg_reward = sum(epoch_rewards) / max(1, len(epoch_rewards))
-        avg_policy = epoch_policy_loss / max(1, num_batches)
-        avg_kl = epoch_kl_loss / max(1, num_batches)
-        avg_total = epoch_total_loss / max(1, num_batches)
+        avg_epoch_reward = np.mean(epoch_rewards) if epoch_rewards else 0.0
+        avg_policy_loss = epoch_policy_loss / max(1, num_batches)
+        avg_kl_loss = epoch_kl_loss / max(1, num_batches)
+        avg_total_loss = epoch_total_loss / max(1, num_batches)
 
-        chaining_r = sum(epoch_rewards_by_task["chaining"]) / max(1, len(epoch_rewards_by_task["chaining"]))
-        inter_r = sum(epoch_rewards_by_task["intersection"]) / max(1, len(epoch_rewards_by_task["intersection"]))
-        fc_r = sum(epoch_rewards_by_task["fact_checking"]) / max(1, len(epoch_rewards_by_task["fact_checking"]))
+        reward_ch = np.mean(epoch_rewards_by_task["chaining"]) if epoch_rewards_by_task["chaining"] else 0.0
+        reward_in = np.mean(epoch_rewards_by_task["intersection"]) if epoch_rewards_by_task["intersection"] else 0.0
+        reward_fc = np.mean(epoch_rewards_by_task["fact_checking"]) if epoch_rewards_by_task["fact_checking"] else 0.0
 
         print(
-            f"Epoch {epoch:02d}/{args.end_epoch:02d} | "
-            f"Reward: {avg_reward:.3%} | "
-            f"Chaining: {chaining_r:.3%} | Inter: {inter_r:.3%} | FC: {fc_r:.3%} | "
-            f"Loss: {avg_total:.4f} (Pol: {avg_policy:.4f}, KL: {avg_kl:.4f})",
-            flush=True,
+            f"Epoch {epoch:02d}/{args.end_epoch} | Reward: {avg_epoch_reward*100:.3f}% | "
+            f"Chaining: {reward_ch*100:.3f}% | Inter: {reward_in*100:.3f}% | FC: {reward_fc*100:.3f}% | "
+            f"Loss: {avg_total_loss:.4f} (Pol: {avg_policy_loss:.4f}, KL: {avg_kl_loss:.4f})",
+            flush=True
         )
 
         wandb.log({
             "epoch": epoch,
-            "train/epoch_rlvr_reward": avg_reward,
-            "train/epoch_reward_chaining": chaining_r,
-            "train/epoch_reward_intersection": inter_r,
-            "train/epoch_reward_fact_checking": fc_r,
-            "train/epoch_policy_loss": avg_policy,
-            "train/epoch_kl_loss": avg_kl,
-            "train/epoch_total_loss": avg_total,
+            "train/epoch_total_loss": avg_total_loss,
+            "train/epoch_policy_loss": avg_policy_loss,
+            "train/epoch_kl_loss": avg_kl_loss,
+            "train/epoch_rlvr_reward": avg_epoch_reward,
+            "train/epoch_reward_chaining": reward_ch,
+            "train/epoch_reward_intersection": reward_in,
+            "train/epoch_reward_fact_checking": reward_fc,
         })
 
-        # Save per-epoch adapter weights
-        ckpt_dir = out_dir / f"checkpoint-epoch-{epoch}"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        # Save per-epoch checkpoint
+        ckpt_dir = os.path.join(method_out_dir, f"checkpoint-epoch-{epoch}")
+        os.makedirs(ckpt_dir, exist_ok=True)
         model.save_pretrained(ckpt_dir, selected_adapters=["default"])
         tokenizer.save_pretrained(ckpt_dir)
         print(f"Saved RLVR adapter checkpoint -> {ckpt_dir}")
@@ -394,7 +399,8 @@ def train_rlvr(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Train KUG 2-Stage RLVR with GRPO and Verifiable Rewards")
-    parser.add_argument("--method", type=str, default="two_stage_breadcrumb_rlvr")
+    parser.add_argument("--method", type=str, default="two_stage_cot_rlvr")
+    parser.add_argument("--use_cot", action="store_true", default=True)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-1.5B")
     parser.add_argument("--init_checkpoint", type=str, default="outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b/checkpoint-epoch-15")
     parser.add_argument("--dataset_path", type=str, default="data/processed/kug_dataset_all.jsonl")
@@ -408,7 +414,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--max_prompt_length", type=int, default=256)
-    parser.add_argument("--max_new_tokens", type=int, default=32)
+    parser.add_argument("--max_new_tokens", type=int, default=96)
     parser.add_argument("--kl_beta", type=float, default=0.04)
     parser.add_argument("--clip_eps", type=float, default=0.2)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
