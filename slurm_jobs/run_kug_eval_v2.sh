@@ -23,10 +23,10 @@
 set -euo pipefail
 
 CKPT_DIR="${1:-outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b}"
-SAMPLE_SIZE="${2:-500}"
+SAMPLE_SIZE="${2:-400}"
 
 echo "================================================================"
-echo "  KUG v2 Evaluation (Fixed Evaluator — prompt-only generate)"
+echo "  KUG v2 Fast Evaluation (Stratified Evaluator — prompt-only)"
 echo "  Checkpoint Dir: ${CKPT_DIR}"
 echo "  Sample Size: ${SAMPLE_SIZE}"
 echo "  Host: $(hostname)"
@@ -48,8 +48,8 @@ export HF_DATASETS_CACHE="${HF_HOME}"
 
 PYTHON="/users/jerryma/.conda/envs/torch2.8/bin/python"
 
-echo "Running fixed evaluation across all epoch checkpoints..."
-${PYTHON} src/analysis/kug_eval_diagnostics.py \
+echo "Running fast stratified evaluation across all epoch checkpoints..."
+${PYTHON} scripts/analysis/fast_kug_eval.py \
     --ckpt_dir "${CKPT_DIR}" \
     --eval_dataset_path "data/processed/kug_dataset_all.jsonl" \
     --sample_size "${SAMPLE_SIZE}"

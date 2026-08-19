@@ -86,17 +86,17 @@ def test_compute_verifiable_reward():
     c1 = "<think> Step 1: Laser cooling of solids </think>\nAnswer: Resolved sideband cooling"
     assert compute_verifiable_reward(c1, "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 1.00
 
-    # 2. Chaining Direct Target Match (0.80)
+    # 2. Chaining Direct Target Match (1.00)
     c2 = "Answer: Resolved sideband cooling"
-    assert compute_verifiable_reward(c2, "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 0.80
+    assert compute_verifiable_reward(c2, "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 1.00
 
-    # 3. Chaining Step 1 Bridge Solved in Thought, wrong final answer (0.40)
+    # 3. Chaining Step 1 Bridge Solved in Thought, wrong final answer (0.50 in Phase 1)
     c3 = "Reasoning: Laser cooling of solids is the intermediate paper.\nAnswer: Some Wrong Target"
-    assert compute_verifiable_reward(c3, "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 0.40
+    assert compute_verifiable_reward(c3, "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 0.50
 
-    # 4. Chaining stopped at bridge in final answer (0.30)
+    # 4. Chaining stopped at bridge in final answer (0.40 in Phase 1)
     c4 = "Answer: Laser cooling of solids"
-    assert compute_verifiable_reward(c4, "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 0.30
+    assert compute_verifiable_reward(c4, "Resolved sideband cooling", "chaining", bridge_entity="Laser cooling of solids") == 0.40
 
     # 5. Chaining Off-path Hallucination (0.00)
     c5 = "Reasoning: completely random hallucination\nAnswer: wrong answer"
@@ -113,6 +113,27 @@ def test_compute_verifiable_reward():
     assert compute_verifiable_reward("Answer: true", "Random Entity Name", "fact_checking", fc_label="false") == 0.0
 
 
+def test_curriculum_annealing_reward():
+    bridge = "Laser cooling of solids"
+    target = "Resolved sideband cooling"
+    
+    # 1. Phase 1 (Epoch 20): Discovery
+    c_bridge = f"Answer: {bridge}"
+    assert compute_verifiable_reward(c_bridge, target, "chaining", bridge_entity=bridge, epoch=20, curriculum_anneal=True) == 0.40
+    
+    # 2. Phase 2 (Epoch 30): Annealing (decay = 5/10 = 0.5)
+    assert compute_verifiable_reward(c_bridge, target, "chaining", bridge_entity=bridge, epoch=30, curriculum_anneal=True) == 0.20
+    
+    # 3. Phase 3 (Epoch 40): Active Penalty (-0.30)
+    assert compute_verifiable_reward(c_bridge, target, "chaining", bridge_entity=bridge, epoch=40, curriculum_anneal=True) == -0.30
+    
+    # 4. Target Match is ALWAYS 1.00 regardless of phase
+    c_target = f"Answer: {target}"
+    assert compute_verifiable_reward(c_target, target, "chaining", bridge_entity=bridge, epoch=20, curriculum_anneal=True) == 1.00
+    assert compute_verifiable_reward(c_target, target, "chaining", bridge_entity=bridge, epoch=30, curriculum_anneal=True) == 1.00
+    assert compute_verifiable_reward(c_target, target, "chaining", bridge_entity=bridge, epoch=40, curriculum_anneal=True) == 1.00
+
+
 if __name__ == "__main__":
     test_normalize_text()
     test_extract_answer_text()
@@ -120,4 +141,5 @@ if __name__ == "__main__":
     test_verify_fact_checking()
     test_split_cot_completion()
     test_compute_verifiable_reward()
-    print("All 2-Step CoT RLVR verifier unit tests passed successfully!")
+    test_curriculum_annealing_reward()
+    print("All 2-Step CoT RLVR verifier & Curriculum Annealing unit tests passed successfully!")

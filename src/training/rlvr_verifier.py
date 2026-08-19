@@ -150,25 +150,30 @@ def compute_verifiable_reward(
     task_type: str,
     bridge_entity: str = "",
     chain_hops: list = None,
-    fc_label: str = ""
+    fc_label: str = "",
+    epoch: int = 1,
+    curriculum_anneal: bool = True
 ) -> float:
     """
-    Main entry point for computing verifiable RLVR reward with 2-Step CoT Scratchpad support.
+    Main entry point for computing verifiable RLVR reward with Bridge-Penalized Curriculum Annealing
+    and 2-Step CoT Scratchpad support.
     
-    Reward Tiers:
-      - Chaining (Multi-hop Reasoning):
-          * 2-Step CoT Success (Bridge B in Thought + Target C in Answer): R = 1.00
-          * Direct Target Match (Target C in Answer):                       R = 0.80
-          * Step 1 CoT Reasoning (Bridge B in Thought):                     R = 0.40
-          * Partial Bridge Match (Bridge B in Answer):                      R = 0.30
-          * Intermediate Hop Match in Thought:                              R = 0.20
-          * Hallucination / Off-Path:                                       R = 0.00
-      - Intersection (Parallel Constraints):
-          * Target Entity in Answer:                                        R = 1.00
-          * Mismatch:                                                       R = 0.00
-      - Fact Checking (Binary Verification):
-          * Correct Boolean in Answer:                                      R = 1.00
-          * Incorrect Boolean:                                              R = 0.00
+    Curriculum Annealing Schedule (for Chaining):
+      - Discovery Phase (Epoch <= 25):
+          * Full Target Match:                R = 1.00
+          * Bridge in Thought:                R = 0.50
+          * Bridge in Answer:                 R = 0.40
+          * Intermediate Hop:                 R = 0.20
+      - Annealing Phase (Epoch 26..35):
+          * Full Target Match:                R = 1.00
+          * Bridge in Thought:                R = 0.50 * (35 - epoch) / 10
+          * Bridge in Answer:                 R = 0.40 * (35 - epoch) / 10
+          * Intermediate Hop:                 R = 0.20 * (35 - epoch) / 10
+      - Exploitation & Penalty Phase (Epoch >= 36):
+          * Full Target Match:                R = 1.00
+          * Bridge in Answer (Stop at Hop 1): R = -0.30  (Active penalty)
+          * Bridge in Thought without Target: R = 0.00
+          * Hallucination / Off-Path:         R = 0.00
     """
     thought, answer = split_cot_completion(completion)
 
@@ -181,7 +186,7 @@ def compute_verifiable_reward(
         target_in_ans = verify_entity_target(answer, target_entity) > 0.0 or verify_entity_target(completion, target_entity) > 0.0
         return 1.0 if target_in_ans else 0.0
 
-    # Chaining (Multi-Hop) evaluation with 2-Step CoT Scratchpad
+    # Chaining (Multi-Hop) evaluation with Curriculum Annealing
     if task_type == "chaining":
         norm_thought = normalize_text(thought)
         norm_bridge = normalize_text(bridge_entity) if bridge_entity else ""
@@ -189,30 +194,54 @@ def compute_verifiable_reward(
 
         target_in_ans = verify_entity_target(answer, target_entity) > 0.0 or (norm_target and norm_target in normalize_text(answer))
         bridge_in_thought = bool(norm_bridge and norm_thought and (norm_bridge in norm_thought or verify_entity_target(thought, bridge_entity) > 0.0))
+        bridge_in_ans = bool(bridge_entity and (verify_entity_target(answer, bridge_entity) > 0.0 or verify_entity_target(completion, bridge_entity) > 0.0))
 
-        # 1. Full 2-Step CoT Reasoning Solved (1.00)
-        if target_in_ans and bridge_in_thought:
+        # 1. Full Target Match (Always 1.00)
+        if target_in_ans:
             return 1.00
 
-        # 2. Direct Target Match (0.80)
-        if target_in_ans or verify_entity_target(completion, target_entity) > 0.0:
+        if verify_entity_target(completion, target_entity) > 0.0:
             return 0.80
 
-        # 3. Step 1 Bridge Solved in Thought Scratchpad (0.40)
-        if bridge_in_thought:
-            return 0.40
-
-        # 4. Model stopped at Bridge in Answer (0.30)
-        if bridge_entity and (verify_entity_target(answer, bridge_entity) > 0.0 or verify_entity_target(completion, bridge_entity) > 0.0):
-            return 0.30
-
-        # 5. Intermediate Hop Mention in Thought (0.20)
-        if chain_hops and norm_thought:
-            for hop in chain_hops:
-                parts = re.split(r"\s+--\[.*?\]-->\s+", hop)
-                for ent in parts:
-                    clean_ent = normalize_text(ent)
-                    if len(clean_ent) >= 3 and clean_ent in norm_thought:
-                        return 0.20
+        # Curriculum schedule for partial / intermediate rewards
+        if curriculum_anneal:
+            if epoch <= 25:
+                # Phase 1: Exploration / Discovery
+                if bridge_in_thought:
+                    return 0.50
+                if bridge_in_ans:
+                    return 0.40
+                if chain_hops and norm_thought:
+                    for hop in chain_hops:
+                        parts = re.split(r"\s+--\[.*?\]-->\s+", hop)
+                        for ent in parts:
+                            clean_ent = normalize_text(ent)
+                            if len(clean_ent) >= 3 and clean_ent in norm_thought:
+                                return 0.20
+            elif 26 <= epoch <= 35:
+                # Phase 2: Linear Annealing
+                decay = max(0.0, (35.0 - epoch) / 10.0)
+                if bridge_in_thought:
+                    return 0.50 * decay
+                if bridge_in_ans:
+                    return 0.40 * decay
+                if chain_hops and norm_thought:
+                    for hop in chain_hops:
+                        parts = re.split(r"\s+--\[.*?\]-->\s+", hop)
+                        for ent in parts:
+                            clean_ent = normalize_text(ent)
+                            if len(clean_ent) >= 3 and clean_ent in norm_thought:
+                                return 0.20 * decay
+            else:
+                # Phase 3 (Epoch >= 36): Active Penalty for stopping at bridge!
+                if bridge_in_ans:
+                    return -0.30  # Penalize stopping at intermediate hop instead of target!
+                return 0.00
+        else:
+            # Fixed Breadcrumbs without annealing
+            if bridge_in_thought:
+                return 0.40
+            if bridge_in_ans:
+                return 0.30
 
     return 0.0

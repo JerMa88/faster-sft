@@ -48,7 +48,7 @@ ANSWER_SEP = "\nAnswer:"
 
 class RLVRQueryDataset(Dataset):
     """
-    Dataset supplying prompt-only inputs for RLVR rollouts and target verification.
+    Dataset supplying prompt-only inputs for RLVR rollouts, paired memory prompts for OPRD, and target verification.
     """
 
     def __init__(self, jsonl_path: str, use_cot: bool = False):
@@ -59,7 +59,9 @@ class RLVRQueryDataset(Dataset):
                     item = json.loads(line)
                     task_type = item.get("task_type", "chaining")
                     p_gen_full = item.get("p_gen", "")
+                    p_mem_full = item.get("p_mem", "")
                     sep_pos = p_gen_full.rfind(ANSWER_SEP)
+                    sep_mem_pos = p_mem_full.rfind(ANSWER_SEP)
 
                     if use_cot and task_type == "chaining":
                         query = p_gen_full[: sep_pos] if sep_pos != -1 else p_gen_full
@@ -70,10 +72,16 @@ class RLVRQueryDataset(Dataset):
                         else:
                             p_gen_prompt = p_gen_full
 
+                    if sep_mem_pos != -1:
+                        p_mem_prompt = p_mem_full[: sep_mem_pos + len(ANSWER_SEP)]
+                    else:
+                        p_mem_prompt = p_mem_full
+
                     self.data.append({
                         "id": item.get("id", ""),
                         "task_type": task_type,
                         "p_gen_prompt": p_gen_prompt,
+                        "p_mem_prompt": p_mem_prompt,
                         "target_entity": item.get("target_entity", ""),
                         "bridge_entity": item.get("bridge_entity", ""),
                         "chain_hops": item.get("chain_hops", []),
@@ -94,6 +102,7 @@ def collate_rlvr_batch(batch: List[dict]) -> dict:
         "id": [b["id"] for b in batch],
         "task_type": [b["task_type"] for b in batch],
         "p_gen_prompt": [b["p_gen_prompt"] for b in batch],
+        "p_mem_prompt": [b["p_mem_prompt"] for b in batch],
         "target_entity": [b["target_entity"] for b in batch],
         "bridge_entity": [b["bridge_entity"] for b in batch],
         "chain_hops": [b["chain_hops"] for b in batch],
@@ -111,37 +120,28 @@ def compute_grad_norm(model: nn.Module) -> float:
 
 
 def train_rlvr(args):
-    print("=== Starting KUG 2-Stage RLVR Training (GRPO) ===")
-    print(f"Base Model: {args.model_name_or_path}")
-    print(f"Init Checkpoint (Stage 1): {args.init_checkpoint}")
-    print(f"Dataset: {args.dataset_path}")
-    print(f"Start Epoch: {args.start_epoch}, End Epoch: {args.end_epoch}")
-    print(f"Batch Size: {args.batch_size}, Grad Accum: {args.gradient_accumulation_steps}")
-    print(f"Rollouts per prompt (K): {args.num_rollouts}, Temperature: {args.temperature}")
-    print(f"KL Penalty Beta: {args.kl_beta}, Clip Epsilon: {args.clip_eps}")
-    print(f"LR: {args.learning_rate}")
+    print("=" * 70)
+    print("  KUG 2-Stage RLVR Training (GRPO + OPRD + Curriculum Annealing)")
+    print(f"  Base Model:       {args.model_name_or_path}")
+    print(f"  Init Checkpoint:  {args.init_checkpoint}")
+    print(f"  Dataset:          {args.dataset_path}")
+    print(f"  Epochs:           {args.start_epoch} -> {args.end_epoch}")
+    print(f"  Rollouts (K):     {args.num_rollouts}")
+    print(f"  Batch Size:       {args.batch_size} (Grad Accum: {args.gradient_accumulation_steps})")
+    print(f"  KL Beta:          {args.kl_beta}")
+    print(f"  OPRD Weight:      {args.oprd_weight}")
+    print(f"  Curriculum Anneal:{args.curriculum_anneal}")
+    print(f"  Use CoT:          {args.use_cot}")
+    print("=" * 70)
 
-    out_dir = Path(args.output_dir) / f"{args.method}_qwen2.5-1.5b"
+    out_dir = Path(args.output_dir) / f"{args.method}_{Path(args.model_name_or_path).name.lower()}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize W&B
     wandb_run = wandb.init(
         project=args.wandb_project,
-        name=f"train_v2_{args.method}_qwen2.5-1.5b",
-        config={
-            "method": args.method,
-            "base_model": args.model_name_or_path,
-            "init_checkpoint": args.init_checkpoint,
-            "start_epoch": args.start_epoch,
-            "end_epoch": args.end_epoch,
-            "batch_size": args.batch_size,
-            "gradient_accumulation_steps": args.gradient_accumulation_steps,
-            "num_rollouts": args.num_rollouts,
-            "temperature": args.temperature,
-            "kl_beta": args.kl_beta,
-            "clip_eps": args.clip_eps,
-            "learning_rate": args.learning_rate,
-        },
+        name=f"train_v2_{args.method}_{Path(args.model_name_or_path).name.lower()}",
+        config=vars(args),
     )
     wandb_run_id = wandb_run.id
     print(f"W&B Run Initialized ID: {wandb_run_id}")
@@ -164,7 +164,7 @@ def train_rlvr(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"  # Left-padding required for batched autoregressive generation
+    tokenizer.padding_side = "left"
 
     print("Loading base model onto GPU...")
     base_model = AutoModelForCausalLM.from_pretrained(
@@ -178,8 +178,8 @@ def train_rlvr(args):
     print(f"Loading Stage 1 LoRA checkpoint from: {args.init_checkpoint}")
     model = PeftModel.from_pretrained(base_model, args.init_checkpoint, adapter_name="default", is_trainable=True)
 
-    # Also load the identical Stage 1 checkpoint as frozen "reference" policy for KL penalty
-    print("Loading frozen reference adapter for KL divergence calculation...")
+    # Also load the identical Stage 1 checkpoint as frozen "reference" policy for KL penalty and OPRD
+    print("Loading frozen reference adapter for KL divergence and OPRD calculation...")
     model.load_adapter(args.init_checkpoint, adapter_name="reference")
     # Freeze reference adapter parameters
     for name, param in model.named_parameters():
@@ -212,14 +212,16 @@ def train_rlvr(args):
         epoch_rewards_by_task = {"chaining": [], "intersection": [], "fact_checking": []}
         epoch_policy_loss = 0.0
         epoch_kl_loss = 0.0
+        epoch_oprd_loss = 0.0
         epoch_total_loss = 0.0
         num_batches = 0
 
-        print(f"\n[RLVR Epoch {epoch:02d}/{args.end_epoch}] Sampling rollouts and computing verifiable rewards...", flush=True)
+        print(f"\n[RLVR Epoch {epoch:02d}/{args.end_epoch}] Sampling rollouts and computing verifiable rewards (Curriculum Phase)...", flush=True)
 
         optimizer.zero_grad()
         for step, batch in enumerate(dataloader):
             prompts = batch["p_gen_prompt"]
+            mem_prompts = batch["p_mem_prompt"]
             targets = batch["target_entity"]
             task_types = batch["task_type"]
             bridge_entities = batch["bridge_entity"]
@@ -230,15 +232,15 @@ def train_rlvr(args):
             # Tokenize prompts (left-padded for batch generation)
             tokenizer.padding_side = "left"
             prompt_enc = tokenizer(prompts, padding=True, truncation=True, max_length=args.max_prompt_length, return_tensors="pt")
-            prompt_ids = prompt_enc.input_ids.cuda()  # (B, L_prompt)
+            prompt_ids = prompt_enc.input_ids.cuda()
             prompt_mask = prompt_enc.attention_mask.cuda()
 
             # Repeat each prompt K times for group rollout generation
-            expanded_prompt_ids = prompt_ids.repeat_interleave(K, dim=0)    # (B*K, L_prompt)
-            expanded_prompt_mask = prompt_mask.repeat_interleave(K, dim=0)  # (B*K, L_prompt)
+            expanded_prompt_ids = prompt_ids.repeat_interleave(K, dim=0)
+            expanded_prompt_mask = prompt_mask.repeat_interleave(K, dim=0)
             prompt_len = expanded_prompt_ids.shape[1]
 
-            # 1. Generate K rollouts per prompt with trainable policy (sampling with T=0.85)
+            # 1. Generate K rollouts per prompt with trainable policy
             model.eval()
             model.set_adapter("default")
             with torch.no_grad():
@@ -251,14 +253,12 @@ def train_rlvr(args):
                     max_new_tokens=args.max_new_tokens,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
-                )  # (B*K, L_total)
+                )
 
             model.train()
-            # Extract completion tokens only (after prompt_len)
             completion_seqs = generated_seqs[:, prompt_len:]
-            total_seq_len = generated_seqs.shape[1]
 
-            # Decode completions to text and compute verifiable rewards with 2-Step CoT Scratchpad
+            # Decode completions to text and compute verifiable rewards with Curriculum Annealing
             rewards = []
             for i in range(B * K):
                 prompt_idx = i // K
@@ -270,6 +270,8 @@ def train_rlvr(args):
                     bridge_entity=bridge_entities[prompt_idx],
                     chain_hops=chain_hops_list[prompt_idx],
                     fc_label=fc_labels[prompt_idx],
+                    epoch=epoch,
+                    curriculum_anneal=args.curriculum_anneal,
                 )
                 rewards.append(r)
                 task = task_types[prompt_idx]
@@ -282,25 +284,25 @@ def train_rlvr(args):
             # 2. Compute Group Relative Advantages
             mean_r = rewards_tensor.mean(dim=1, keepdim=True)
             std_r = rewards_tensor.std(dim=1, keepdim=True) + 1e-4
-            advantages = (rewards_tensor - mean_r) / std_r  # (B, K)
-            flat_advantages = advantages.view(-1)          # (B*K,)
+            advantages = (rewards_tensor - mean_r) / std_r
+            flat_advantages = advantages.view(-1)
 
-            # Build attention mask and response loss mask for full generated sequences
             gen_attention_mask = (generated_seqs != tokenizer.pad_token_id).long()
-            # Response mask: 1 only for non-padding completion tokens
             response_mask = (generated_seqs[:, prompt_len:] != tokenizer.pad_token_id).float()
             num_response_tokens = response_mask.sum().clamp(min=1.0)
 
-            # 3. Forward pass under Policy Model (default adapter) -> completion token log probs
+            # 3. Forward pass under Policy Model (default adapter) -> completion token log probs and prompt hidden state
             target_ids = generated_seqs[:, 1:]
             comp_targets = target_ids[:, prompt_len - 1 :]
             model.set_adapter("default")
-            policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask)
-            # Memory optimization: Slice logits ONLY for completion tokens instead of entire prompt
+            policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask, output_hidden_states=True)
             policy_comp_logits = policy_outputs.logits[:, prompt_len - 1 : -1, :]
             policy_comp_log_probs = F.log_softmax(policy_comp_logits, dim=-1).gather(
                 dim=-1, index=comp_targets.unsqueeze(-1)
             ).squeeze(-1)
+            
+            # Policy prompt representation (last token of prompt)
+            h_policy_prompt = policy_outputs.hidden_states[-1][::K, prompt_len - 1, :].float()
             del policy_outputs, policy_comp_logits
 
             # 4. Forward pass under Reference Model (reference adapter) -> ref completion token log probs
@@ -313,32 +315,47 @@ def train_rlvr(args):
                 ).squeeze(-1)
                 del ref_outputs, ref_comp_logits
 
+            # 5. OPRD: Reference memory representation distillation
+            if args.oprd_weight > 0.0:
+                mem_enc = tokenizer(
+                    mem_prompts, padding=True, truncation=True, max_length=args.max_prompt_length, return_tensors="pt"
+                ).to("cuda")
+                with torch.no_grad():
+                    ref_mem_outputs = model(input_ids=mem_enc.input_ids, attention_mask=mem_enc.attention_mask, output_hidden_states=True)
+                    last_mem_indices = (mem_enc.attention_mask.sum(dim=1) - 1).clamp(min=0)
+                    h_ref_mem = ref_mem_outputs.hidden_states[-1][torch.arange(B, device="cuda"), last_mem_indices].detach().float()
+                    del ref_mem_outputs
+
+                cos_sim = F.cosine_similarity(h_policy_prompt, h_ref_mem, dim=-1)
+                oprd_loss = (1.0 - cos_sim).mean()
+            else:
+                oprd_loss = torch.tensor(0.0, device="cuda")
+
             # Switch back to trainable policy adapter
             model.set_adapter("default")
 
-            # 5. Compute Policy Gradient Loss with Advantage Weighting
-            # Token importance ratio (at generation time, pi_old is detached policy_comp_log_probs)
+            # 6. Compute Policy Gradient Loss with Advantage Weighting
             log_ratio = policy_comp_log_probs - policy_comp_log_probs.detach()
             ratio = torch.exp(log_ratio)
 
-            adv_expanded = flat_advantages.unsqueeze(1)  # (B*K, 1)
+            adv_expanded = flat_advantages.unsqueeze(1)
             surr1 = ratio * adv_expanded
             surr2 = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * adv_expanded
             policy_loss_per_token = -torch.min(surr1, surr2) * response_mask
             policy_loss = policy_loss_per_token.sum() / num_response_tokens
 
-            # 6. Compute Token-Level KL Penalty against Stage 1 Reference
-            # KL(pi || ref) approx = exp(log_ref - log_pi) - (log_ref - log_pi) - 1
+            # 7. Compute Token-Level KL Penalty against Stage 1 Reference
             log_diff = ref_comp_log_probs - policy_comp_log_probs
             kl_per_token = (torch.exp(log_diff) - log_diff - 1.0) * response_mask
             kl_loss = kl_per_token.sum() / num_response_tokens
 
-            total_loss = policy_loss + args.kl_beta * kl_loss
+            total_loss = policy_loss + args.kl_beta * kl_loss + args.oprd_weight * oprd_loss
             scaled_loss = total_loss / args.gradient_accumulation_steps
             scaled_loss.backward()
 
             epoch_policy_loss += policy_loss.item()
             epoch_kl_loss += kl_loss.item()
+            epoch_oprd_loss += oprd_loss.item()
             epoch_total_loss += total_loss.item()
             num_batches += 1
 
@@ -355,6 +372,7 @@ def train_rlvr(args):
                         "train/total_loss": total_loss.item(),
                         "train/policy_loss": policy_loss.item(),
                         "train/kl_loss": kl_loss.item(),
+                        "train/oprd_loss": oprd_loss.item(),
                         "train/rlvr_step_reward": step_reward,
                         "train/grad_norm": grad_norm,
                         "step": global_step,
@@ -363,6 +381,7 @@ def train_rlvr(args):
         avg_epoch_reward = np.mean(epoch_rewards) if epoch_rewards else 0.0
         avg_policy_loss = epoch_policy_loss / max(1, num_batches)
         avg_kl_loss = epoch_kl_loss / max(1, num_batches)
+        avg_oprd_loss = epoch_oprd_loss / max(1, num_batches)
         avg_total_loss = epoch_total_loss / max(1, num_batches)
 
         reward_ch = np.mean(epoch_rewards_by_task["chaining"]) if epoch_rewards_by_task["chaining"] else 0.0
@@ -372,19 +391,20 @@ def train_rlvr(args):
         print(
             f"Epoch {epoch:02d}/{args.end_epoch} | Reward: {avg_epoch_reward*100:.3f}% | "
             f"Chaining: {reward_ch*100:.3f}% | Inter: {reward_in*100:.3f}% | FC: {reward_fc*100:.3f}% | "
-            f"Loss: {avg_total_loss:.4f} (Pol: {avg_policy_loss:.4f}, KL: {avg_kl_loss:.4f})",
+            f"Loss: {avg_total_loss:.4f} (Pol: {avg_policy_loss:.4f}, KL: {avg_kl_loss:.4f}, OPRD: {avg_oprd_loss:.4f})",
             flush=True
         )
 
         wandb.log({
             "epoch": epoch,
-            "train/epoch_total_loss": avg_total_loss,
-            "train/epoch_policy_loss": avg_policy_loss,
-            "train/epoch_kl_loss": avg_kl_loss,
             "train/epoch_rlvr_reward": avg_epoch_reward,
             "train/epoch_reward_chaining": reward_ch,
             "train/epoch_reward_intersection": reward_in,
             "train/epoch_reward_fact_checking": reward_fc,
+            "train/epoch_total_loss": avg_total_loss,
+            "train/epoch_policy_loss": avg_policy_loss,
+            "train/epoch_kl_loss": avg_kl_loss,
+            "train/epoch_oprd_loss": avg_oprd_loss,
         })
 
         # Save per-epoch checkpoint
@@ -399,9 +419,11 @@ def train_rlvr(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train KUG 2-Stage RLVR with GRPO and Verifiable Rewards")
-    parser.add_argument("--method", type=str, default="two_stage_cot_rlvr")
+    parser = argparse.ArgumentParser(description="Train KUG 2-Stage RLVR with GRPO, OPRD, and Curriculum Annealing")
+    parser.add_argument("--method", type=str, default="two_stage_oprd_curriculum_rlvr")
     parser.add_argument("--use_cot", action="store_true", default=True)
+    parser.add_argument("--curriculum_anneal", action="store_true", default=True)
+    parser.add_argument("--oprd_weight", type=float, default=0.10)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-1.5B")
     parser.add_argument("--init_checkpoint", type=str, default="outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b/checkpoint-epoch-15")
     parser.add_argument("--dataset_path", type=str, default="data/processed/kug_dataset_all.jsonl")

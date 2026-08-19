@@ -85,7 +85,7 @@ def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda", batch
             with torch.no_grad():
                 out_ids = model.generate(
                     **enc,
-                    max_new_tokens=32,
+                    max_new_tokens=96,
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
                 )
