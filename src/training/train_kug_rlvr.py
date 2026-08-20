@@ -304,6 +304,9 @@ def train_rlvr(args):
             policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask, output_hidden_states=True)
             policy_comp_logits = policy_outputs.logits[:, prompt_len - 1 : -1, :]
             policy_comp_log_probs = F.log_softmax(policy_comp_logits, dim=-1).gather(
+                dim=-1, index=comp_targets.unsqueeze(-1)
+            ).squeeze(-1)
+
             # Policy prompt representation
             policy_prompt_hidden_states = tuple(
                 hs[::K, :prompt_len, :] for hs in policy_outputs.hidden_states
