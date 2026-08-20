@@ -1,10 +1,11 @@
 """
 Entity Token Span Extractor for Knowledge-Circuit Routing
 Finds token span [start_idx, end_idx) corresponding to an entity string mention
-within tokenized input sequences.
+within tokenized input sequences, with full support for left-padded or right-padded batches.
 """
 
 from typing import List, Optional, Tuple
+import torch
 
 
 def find_token_span_for_substring(
@@ -46,20 +47,26 @@ def find_token_span_for_substring(
 def extract_entity_token_mask(
     input_ids_len: int,
     span: Optional[Tuple[int, int]],
+    pad_offset: int = 0,
 ) -> List[float]:
     """
-    Creates a binary/normalized mask vector of length input_ids_len where tokens in span are 1.0 (or normalized).
-    If span is None, returns uniform mask across all tokens.
+    Creates a normalized mask vector of length input_ids_len where tokens in span are active.
+    pad_offset shifts the span index (e.g. for left-padded batch inputs).
+    If span is None, returns uniform mask across non-padded tokens.
     """
-    if span is None or span[0] >= input_ids_len or span[1] <= span[0]:
-        # Fallback to uniform mask
-        return [1.0 / max(input_ids_len, 1)] * input_ids_len
+    mask = [0.0] * input_ids_len
+    if span is None or span[1] <= span[0]:
+        # Fallback to uniform over non-padded tokens
+        valid_start = max(0, pad_offset)
+        valid_len = max(1, input_ids_len - valid_start)
+        for i in range(valid_start, input_ids_len):
+            mask[i] = 1.0 / valid_len
+        return mask
 
-    s = max(0, span[0])
-    e = min(input_ids_len, span[1])
+    s = max(0, span[0] + pad_offset)
+    e = min(input_ids_len, span[1] + pad_offset)
     span_len = max(1, e - s)
 
-    mask = [0.0] * input_ids_len
     for i in range(s, e):
         mask[i] = 1.0 / span_len
     return mask

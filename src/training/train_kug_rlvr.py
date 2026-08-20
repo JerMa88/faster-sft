@@ -325,6 +325,7 @@ def train_rlvr(args):
 
             # 5. Knowledge-Circuit Routing (KCR): Causal Head-Entity Layer-Pair Alignment
             if args.kcr_weight > 0.0:
+                tokenizer.padding_side = "right"
                 mem_enc = tokenizer(
                     mem_prompts, padding=True, truncation=True, max_length=args.max_prompt_length, return_tensors="pt"
                 ).to("cuda")
@@ -336,8 +337,11 @@ def train_rlvr(args):
                 mem_masks_list = []
                 for b_idx in range(B):
                     head_ent = batch["head_entity"][b_idx]
-                    p_gen_txt = batch_prompts[b_idx]
+                    p_gen_txt = prompts[b_idx]
                     p_mem_txt = mem_prompts[b_idx]
+
+                    unpadded_gen_len = int(prompt_mask[b_idx].sum().item())
+                    gen_pad_offset = prompt_len - unpadded_gen_len
 
                     gen_toks = tokenizer(p_gen_txt, return_offsets_mapping=True)
                     mem_toks = tokenizer(p_mem_txt, return_offsets_mapping=True)
@@ -345,8 +349,8 @@ def train_rlvr(args):
                     span_gen = find_token_span_for_substring(p_gen_txt, head_ent, gen_toks.get("offset_mapping", []))
                     span_mem = find_token_span_for_substring(p_mem_txt, head_ent, mem_toks.get("offset_mapping", []))
 
-                    gen_masks_list.append(extract_entity_token_mask(prompt_len, span_gen))
-                    mem_masks_list.append(extract_entity_token_mask(mem_enc.input_ids.shape[1], span_mem))
+                    gen_masks_list.append(extract_entity_token_mask(prompt_len, span_gen, pad_offset=gen_pad_offset))
+                    mem_masks_list.append(extract_entity_token_mask(mem_enc.input_ids.shape[1], span_mem, pad_offset=0))
 
                 gen_entity_masks = torch.tensor(gen_masks_list, device="cuda", dtype=torch.float32)
                 mem_entity_masks = torch.tensor(mem_masks_list, device="cuda", dtype=torch.float32)
