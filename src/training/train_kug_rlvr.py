@@ -41,6 +41,8 @@ os.environ["HF_DATASETS_CACHE"] = HF_CACHE
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from src.training.rlvr_verifier import compute_verifiable_reward
+from src.models.entity_span_extractor import find_token_span_for_substring, extract_entity_token_mask
+from src.losses.kcr_loss import KnowledgeCircuitRoutingLoss
 
 
 ANSWER_SEP = "\nAnswer:"
@@ -82,6 +84,7 @@ class RLVRQueryDataset(Dataset):
                         "task_type": task_type,
                         "p_gen_prompt": p_gen_prompt,
                         "p_mem_prompt": p_mem_prompt,
+                        "head_entity": item.get("head_entity", ""),
                         "target_entity": item.get("target_entity", ""),
                         "bridge_entity": item.get("bridge_entity", ""),
                         "chain_hops": item.get("chain_hops", []),
@@ -103,6 +106,7 @@ def collate_rlvr_batch(batch: List[dict]) -> dict:
         "task_type": [b["task_type"] for b in batch],
         "p_gen_prompt": [b["p_gen_prompt"] for b in batch],
         "p_mem_prompt": [b["p_mem_prompt"] for b in batch],
+        "head_entity": [b["head_entity"] for b in batch],
         "target_entity": [b["target_entity"] for b in batch],
         "bridge_entity": [b["bridge_entity"] for b in batch],
         "chain_hops": [b["chain_hops"] for b in batch],
@@ -206,13 +210,15 @@ def train_rlvr(args):
     global_step = 0
     K = args.num_rollouts
 
+    kcr_loss_fn = KnowledgeCircuitRoutingLoss(target_layer_ratio=0.50, source_layer_ratios=(0.10, 0.80)).to("cuda")
+
     for epoch in range(args.start_epoch, args.end_epoch + 1):
         model.train()
         epoch_rewards = []
         epoch_rewards_by_task = {"chaining": [], "intersection": [], "fact_checking": []}
         epoch_policy_loss = 0.0
         epoch_kl_loss = 0.0
-        epoch_oprd_loss = 0.0
+        epoch_kcr_loss = 0.0
         epoch_total_loss = 0.0
         num_batches = 0
 
@@ -298,12 +304,11 @@ def train_rlvr(args):
             policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask, output_hidden_states=True)
             policy_comp_logits = policy_outputs.logits[:, prompt_len - 1 : -1, :]
             policy_comp_log_probs = F.log_softmax(policy_comp_logits, dim=-1).gather(
-                dim=-1, index=comp_targets.unsqueeze(-1)
-            ).squeeze(-1)
-            
-            # Policy prompt representation (last token of prompt)
-            h_policy_prompt = policy_outputs.hidden_states[-1][::K, prompt_len - 1, :].float()
-            del policy_outputs, policy_comp_logits
+            # Policy prompt representation
+            policy_prompt_hidden_states = tuple(
+                hs[::K, :prompt_len, :] for hs in policy_outputs.hidden_states
+            )
+            del policy_comp_logits
 
             # 4. Forward pass under Reference Model (reference adapter) -> ref completion token log probs
             model.set_adapter("reference")
@@ -315,21 +320,45 @@ def train_rlvr(args):
                 ).squeeze(-1)
                 del ref_outputs, ref_comp_logits
 
-            # 5. OPRD: Reference memory representation distillation
-            if args.oprd_weight > 0.0:
+            # 5. Knowledge-Circuit Routing (KCR): Causal Head-Entity Layer-Pair Alignment
+            if args.kcr_weight > 0.0:
                 mem_enc = tokenizer(
                     mem_prompts, padding=True, truncation=True, max_length=args.max_prompt_length, return_tensors="pt"
                 ).to("cuda")
                 with torch.no_grad():
                     ref_mem_outputs = model(input_ids=mem_enc.input_ids, attention_mask=mem_enc.attention_mask, output_hidden_states=True)
-                    last_mem_indices = (mem_enc.attention_mask.sum(dim=1) - 1).clamp(min=0)
-                    h_ref_mem = ref_mem_outputs.hidden_states[-1][torch.arange(B, device="cuda"), last_mem_indices].detach().float()
-                    del ref_mem_outputs
 
-                cos_sim = F.cosine_similarity(h_policy_prompt, h_ref_mem, dim=-1)
-                oprd_loss = (1.0 - cos_sim).mean()
+                # Build token-span masks for head entity in P_gen and P_mem
+                gen_masks_list = []
+                mem_masks_list = []
+                for b_idx in range(B):
+                    head_ent = batch["head_entity"][b_idx]
+                    p_gen_txt = batch_prompts[b_idx]
+                    p_mem_txt = mem_prompts[b_idx]
+
+                    gen_toks = tokenizer(p_gen_txt, return_offsets_mapping=True)
+                    mem_toks = tokenizer(p_mem_txt, return_offsets_mapping=True)
+
+                    span_gen = find_token_span_for_substring(p_gen_txt, head_ent, gen_toks.get("offset_mapping", []))
+                    span_mem = find_token_span_for_substring(p_mem_txt, head_ent, mem_toks.get("offset_mapping", []))
+
+                    gen_masks_list.append(extract_entity_token_mask(prompt_len, span_gen))
+                    mem_masks_list.append(extract_entity_token_mask(mem_enc.input_ids.shape[1], span_mem))
+
+                gen_entity_masks = torch.tensor(gen_masks_list, device="cuda", dtype=torch.float32)
+                mem_entity_masks = torch.tensor(mem_masks_list, device="cuda", dtype=torch.float32)
+
+                kcr_loss = kcr_loss_fn(
+                    policy_prompt_hidden_states,
+                    ref_mem_outputs.hidden_states,
+                    gen_entity_masks,
+                    mem_entity_masks,
+                )
+                del ref_mem_outputs
             else:
-                oprd_loss = torch.tensor(0.0, device="cuda")
+                kcr_loss = torch.tensor(0.0, device="cuda")
+
+            del policy_outputs
 
             # Switch back to trainable policy adapter
             model.set_adapter("default")
@@ -349,13 +378,13 @@ def train_rlvr(args):
             kl_per_token = (torch.exp(log_diff) - log_diff - 1.0) * response_mask
             kl_loss = kl_per_token.sum() / num_response_tokens
 
-            total_loss = policy_loss + args.kl_beta * kl_loss + args.oprd_weight * oprd_loss
+            total_loss = policy_loss + args.kl_beta * kl_loss + args.kcr_weight * kcr_loss
             scaled_loss = total_loss / args.gradient_accumulation_steps
             scaled_loss.backward()
 
             epoch_policy_loss += policy_loss.item()
             epoch_kl_loss += kl_loss.item()
-            epoch_oprd_loss += oprd_loss.item()
+            epoch_kcr_loss += kcr_loss.item()
             epoch_total_loss += total_loss.item()
             num_batches += 1
 
@@ -372,7 +401,7 @@ def train_rlvr(args):
                         "train/total_loss": total_loss.item(),
                         "train/policy_loss": policy_loss.item(),
                         "train/kl_loss": kl_loss.item(),
-                        "train/oprd_loss": oprd_loss.item(),
+                        "train/kcr_loss": kcr_loss.item(),
                         "train/rlvr_step_reward": step_reward,
                         "train/grad_norm": grad_norm,
                         "step": global_step,
@@ -381,7 +410,7 @@ def train_rlvr(args):
         avg_epoch_reward = np.mean(epoch_rewards) if epoch_rewards else 0.0
         avg_policy_loss = epoch_policy_loss / max(1, num_batches)
         avg_kl_loss = epoch_kl_loss / max(1, num_batches)
-        avg_oprd_loss = epoch_oprd_loss / max(1, num_batches)
+        avg_kcr_loss = epoch_kcr_loss / max(1, num_batches)
         avg_total_loss = epoch_total_loss / max(1, num_batches)
 
         reward_ch = np.mean(epoch_rewards_by_task["chaining"]) if epoch_rewards_by_task["chaining"] else 0.0
@@ -391,7 +420,7 @@ def train_rlvr(args):
         print(
             f"Epoch {epoch:02d}/{args.end_epoch} | Reward: {avg_epoch_reward*100:.3f}% | "
             f"Chaining: {reward_ch*100:.3f}% | Inter: {reward_in*100:.3f}% | FC: {reward_fc*100:.3f}% | "
-            f"Loss: {avg_total_loss:.4f} (Pol: {avg_policy_loss:.4f}, KL: {avg_kl_loss:.4f}, OPRD: {avg_oprd_loss:.4f})",
+            f"Loss: {avg_total_loss:.4f} (Pol: {avg_policy_loss:.4f}, KL: {avg_kl_loss:.4f}, KCR: {avg_kcr_loss:.4f})",
             flush=True
         )
 
@@ -404,7 +433,7 @@ def train_rlvr(args):
             "train/epoch_total_loss": avg_total_loss,
             "train/epoch_policy_loss": avg_policy_loss,
             "train/epoch_kl_loss": avg_kl_loss,
-            "train/epoch_oprd_loss": avg_oprd_loss,
+            "train/epoch_kcr_loss": avg_kcr_loss,
         })
 
         # Save per-epoch checkpoint
@@ -419,11 +448,12 @@ def train_rlvr(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train KUG 2-Stage RLVR with GRPO, OPRD, and Curriculum Annealing")
-    parser.add_argument("--method", type=str, default="two_stage_oprd_curriculum_rlvr")
+    parser = argparse.ArgumentParser(description="Train KUG 2-Stage RLVR with GRPO, KCR, and Curriculum Annealing")
+    parser.add_argument("--method", type=str, default="two_stage_kcr_curriculum_rlvr")
     parser.add_argument("--use_cot", action="store_true", default=True)
     parser.add_argument("--curriculum_anneal", action="store_true", default=True)
-    parser.add_argument("--oprd_weight", type=float, default=0.10)
+    parser.add_argument("--kcr_weight", type=float, default=0.15)
+    parser.add_argument("--oprd_weight", type=float, default=0.0)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-1.5B")
     parser.add_argument("--init_checkpoint", type=str, default="outputs/kug_overhaul_v2/baseline_qwen2.5-1.5b/checkpoint-epoch-15")
     parser.add_argument("--dataset_path", type=str, default="data/processed/kug_dataset_all.jsonl")
@@ -449,3 +479,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
