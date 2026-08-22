@@ -27,14 +27,15 @@ GRAD_ACCUM="${3:-8}"
 NUM_ROLLOUTS="${4:-8}"
 KL_BETA="${5:-0.04}"
 LR="${6:-5e-5}"
-KCR_WEIGHT="${7:-0.15}"
-OPRD_WEIGHT="${8:-0.0}"
 MODEL_NAME="Qwen/Qwen3.5-2B"
 
-if [[ "${METHOD}" == "two_stage_oprd_curriculum_rlvr" ]]; then
-    OPRD_WEIGHT="${OPRD_WEIGHT:-0.15}"
+if [[ "${METHOD}" == "two_stage_kcr_curriculum_rlvr" ]]; then
+    KCR_WEIGHT="0.15"
+    OPRD_WEIGHT="0.0"
+elif [[ "${METHOD}" == "two_stage_oprd_curriculum_rlvr" ]]; then
     KCR_WEIGHT="0.0"
-elif [[ "${METHOD}" != "two_stage_kcr_curriculum_rlvr" ]]; then
+    OPRD_WEIGHT="0.15"
+else
     KCR_WEIGHT="0.0"
     OPRD_WEIGHT="0.0"
 fi
@@ -87,6 +88,11 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 PYTHON_BIN="/users/jerryma/.conda/envs/torch2.8/bin/python"
 
+EXTRA_FLAGS=""
+if [[ "${METHOD}" != "two_stage_rlvr" ]]; then
+    EXTRA_FLAGS="--use_cot"
+fi
+
 ${PYTHON_BIN} src/training/train_kug_rlvr.py \
     --method "${METHOD}" \
     --model_name_or_path "${MODEL_NAME}" \
@@ -110,7 +116,7 @@ ${PYTHON_BIN} src/training/train_kug_rlvr.py \
     --kcr_weight "${KCR_WEIGHT}" \
     --oprd_weight "${OPRD_WEIGHT}" \
     --curriculum_anneal \
-    --use_cot \
-    --use_thinking
+    --use_thinking \
+    ${EXTRA_FLAGS}
 
 echo "=== RLVR Training Completed Successfully ==="
