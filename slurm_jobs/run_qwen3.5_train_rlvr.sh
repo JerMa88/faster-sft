@@ -22,8 +22,8 @@
 set -euo pipefail
 
 METHOD="${1:-two_stage_kcr_curriculum_rlvr}"
-BATCH_SIZE="${2:-8}"
-GRAD_ACCUM="${3:-8}"
+BATCH_SIZE="${2:-4}"
+GRAD_ACCUM="${3:-16}"
 NUM_ROLLOUTS="${4:-8}"
 KL_BETA="${5:-0.04}"
 LR="${6:-5e-5}"

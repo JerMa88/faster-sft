@@ -197,6 +197,9 @@ def train_rlvr(args):
             param.requires_grad = False
 
     model.set_adapter("default")
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    print("Gradient checkpointing enabled on policy model.")
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"Policy model initialized with {len(trainable_params)} trainable parameter tensors.")
 
@@ -303,31 +306,59 @@ def train_rlvr(args):
             response_mask = (generated_seqs[:, prompt_len:] != tokenizer.pad_token_id).float()
             num_response_tokens = response_mask.sum().clamp(min=1.0)
 
-            # 3. Forward pass under Policy Model (default adapter) -> completion token log probs and prompt hidden state
+            # 3. Forward pass under Policy Model (default adapter) with micro-batching
             target_ids = generated_seqs[:, 1:]
             comp_targets = target_ids[:, prompt_len - 1 :]
             model.set_adapter("default")
-            policy_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask, output_hidden_states=True)
-            policy_comp_logits = policy_outputs.logits[:, prompt_len - 1 : -1, :]
-            policy_comp_log_probs = F.log_softmax(policy_comp_logits, dim=-1).gather(
-                dim=-1, index=comp_targets.unsqueeze(-1)
-            ).squeeze(-1)
 
-            # Policy prompt representation
-            policy_prompt_hidden_states = tuple(
-                hs[::K, :prompt_len, :] for hs in policy_outputs.hidden_states
-            )
-            del policy_comp_logits
+            micro_bs = 4
+            policy_comp_log_probs_list = []
+            prompt_hs_list = []
 
-            # 4. Forward pass under Reference Model (reference adapter) -> ref completion token log probs
+            for mb_start in range(0, B * K, micro_bs):
+                mb_end = min(mb_start + micro_bs, B * K)
+                mb_seqs = generated_seqs[mb_start:mb_end]
+                mb_mask = gen_attention_mask[mb_start:mb_end]
+                mb_targets = comp_targets[mb_start:mb_end]
+
+                need_hs = (args.kcr_weight > 0.0 or args.oprd_weight > 0.0)
+                mb_out = model(input_ids=mb_seqs, attention_mask=mb_mask, output_hidden_states=need_hs)
+                mb_logits = mb_out.logits[:, prompt_len - 1 : -1, :]
+                mb_lp = F.log_softmax(mb_logits, dim=-1).gather(dim=-1, index=mb_targets.unsqueeze(-1)).squeeze(-1)
+                policy_comp_log_probs_list.append(mb_lp)
+
+                if need_hs:
+                    if not prompt_hs_list:
+                        prompt_hs_list = [[] for _ in range(len(mb_out.hidden_states))]
+                    for l_idx, hs in enumerate(mb_out.hidden_states):
+                        prompt_hs_list[l_idx].append(hs[:, :prompt_len, :])
+                del mb_out, mb_logits, mb_lp
+
+            policy_comp_log_probs = torch.cat(policy_comp_log_probs_list, dim=0)
+
+            if args.kcr_weight > 0.0 or args.oprd_weight > 0.0:
+                all_prompt_hs = tuple(torch.cat(prompt_hs_list[l_idx], dim=0) for l_idx in range(len(prompt_hs_list)))
+                policy_prompt_hidden_states = tuple(hs[::K] for hs in all_prompt_hs)
+            else:
+                policy_prompt_hidden_states = ()
+
+            # 4. Forward pass under Reference Model (reference adapter) with micro-batching
             model.set_adapter("reference")
+            ref_comp_log_probs_list = []
             with torch.no_grad():
-                ref_outputs = model(input_ids=generated_seqs, attention_mask=gen_attention_mask)
-                ref_comp_logits = ref_outputs.logits[:, prompt_len - 1 : -1, :]
-                ref_comp_log_probs = F.log_softmax(ref_comp_logits, dim=-1).gather(
-                    dim=-1, index=comp_targets.unsqueeze(-1)
-                ).squeeze(-1)
-                del ref_outputs, ref_comp_logits
+                for mb_start in range(0, B * K, micro_bs):
+                    mb_end = min(mb_start + micro_bs, B * K)
+                    mb_seqs = generated_seqs[mb_start:mb_end]
+                    mb_mask = gen_attention_mask[mb_start:mb_end]
+                    mb_targets = comp_targets[mb_start:mb_end]
+
+                    mb_out = model(input_ids=mb_seqs, attention_mask=mb_mask)
+                    mb_logits = mb_out.logits[:, prompt_len - 1 : -1, :]
+                    mb_lp = F.log_softmax(mb_logits, dim=-1).gather(dim=-1, index=mb_targets.unsqueeze(-1)).squeeze(-1)
+                    ref_comp_log_probs_list.append(mb_lp)
+                    del mb_out, mb_logits, mb_lp
+
+            ref_comp_log_probs = torch.cat(ref_comp_log_probs_list, dim=0)
 
             # 5. Knowledge-Circuit Routing (KCR): Causal Head-Entity Layer-Pair Alignment
             if args.kcr_weight > 0.0:
