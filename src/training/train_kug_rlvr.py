@@ -402,8 +402,6 @@ def train_rlvr(args):
             else:
                 kcr_loss = torch.tensor(0.0, device="cuda")
 
-            del policy_outputs
-
             # Switch back to trainable policy adapter
             model.set_adapter("default")
 
