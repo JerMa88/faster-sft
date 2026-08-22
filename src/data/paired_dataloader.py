@@ -97,17 +97,67 @@ def _make_completion_only_labels_char_split(
     return input_ids, attention_mask, labels
 
 
+def format_thinking_prompt_and_completion(item: dict, is_mem: bool = True) -> tuple[str, str, str]:
+    """
+    Format (query_prompt, thought_completion, full_text) with coherent factual thinking traces
+    preserving the model's native reasoning capability without corrupting its internal thinking manifold.
+    """
+    target_entity = item.get("target_entity", "").strip()
+    task_type = item.get("task_type", "chaining")
+    raw_text = item.get("p_mem" if is_mem else "p_gen", "")
+
+    sep = ANSWER_SEP
+    sep_pos = raw_text.rfind(sep)
+    query_prompt = raw_text[:sep_pos].strip() if sep_pos != -1 else raw_text.strip()
+
+    if is_mem:
+        thought_completion = (
+            f"<think>\n"
+            f"Retrieving factual knowledge for query: {query_prompt}\n"
+            f"Factual recall: The target entity is '{target_entity}'.\n"
+            f"</think>\n"
+            f"Answer: {target_entity}"
+        )
+    else:
+        if task_type == "chaining" and item.get("chain_hops"):
+            hops_str = "\n".join([f"Step {i+1}: {hop}" for i, hop in enumerate(item["chain_hops"])])
+            thought_completion = (
+                f"<think>\n"
+                f"Multi-hop reasoning path:\n{hops_str}\n"
+                f"Therefore, the final target entity is '{target_entity}'.\n"
+                f"</think>\n"
+                f"Answer: {target_entity}"
+            )
+        elif task_type == "intersection" and item.get("all_heads"):
+            heads_str = ", ".join(item["all_heads"])
+            thought_completion = (
+                f"<think>\n"
+                f"Identifying common entity intersecting all heads: {heads_str}.\n"
+                f"Intersection result: '{target_entity}'.\n"
+                f"</think>\n"
+                f"Answer: {target_entity}"
+            )
+        else:
+            thought_completion = (
+                f"<think>\n"
+                f"Verifying relational facts for query: {query_prompt}\n"
+                f"Result: '{target_entity}'.\n"
+                f"</think>\n"
+                f"Answer: {target_entity}"
+            )
+
+    full_text = f"{query_prompt}\n{thought_completion}"
+    return query_prompt, thought_completion, full_text
+
+
 class PairedSTaRKDataset(Dataset):
     """
     Dataset for KUG experiments providing paired (P_mem, P_gen) samples
     with task disaggregation (chaining, intersection, fact_checking)
     and completion-only loss masking for fast A_mem convergence.
 
-    Key change from previous version:
-      - Both mem_labels and gen_labels are -100 on prompt tokens,
-        active ONLY on "\\nAnswer: {target_entity}" tokens.
-      - Uses character-level splitting + separate tokenization for robust
-        label masking that works correctly with BPE context merging.
+    Supports both standard direct format and native thinking trace format
+    (for reasoning models like Qwen/Qwen3.5-2B).
     """
 
     def __init__(
@@ -115,9 +165,11 @@ class PairedSTaRKDataset(Dataset):
         jsonl_path: str,
         tokenizer: PreTrainedTokenizer,
         max_length: int = 512,
+        use_thinking: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.use_thinking = use_thinking
         self.data = []
         n_filtered_no_sep = 0
         n_filtered_too_long = 0
@@ -128,10 +180,6 @@ class PairedSTaRKDataset(Dataset):
                 if line.strip():
                     raw_records.append(json.loads(line))
 
-        # ── Pre-filter: skip samples where the PROMPT portion (everything up to
-        # "\nAnswer:") is already >= max_length tokens.  Those samples would be
-        # right-truncated before the answer, yielding all-(-100) labels and
-        # contributing zero training signal while wasting a slot in the batch.
         for item in raw_records:
             p_mem = item.get("p_mem", "")
             sep_pos = p_mem.rfind(ANSWER_SEP)
@@ -150,7 +198,7 @@ class PairedSTaRKDataset(Dataset):
         kept = len(self.data)
         print(
             f"[PairedSTaRKDataset] Loaded {kept}/{total_raw} samples "
-            f"(filtered {n_filtered_too_long} too-long, {n_filtered_no_sep} missing sep)"
+            f"(filtered {n_filtered_too_long} too-long, {n_filtered_no_sep} missing sep, use_thinking={use_thinking})"
         )
 
     def __len__(self) -> int:
@@ -180,14 +228,25 @@ class PairedSTaRKDataset(Dataset):
         target_entity = item.get("target_entity", "")
         head_entity = item.get("head_entity", target_entity)
 
-        p_mem_text = item.get(
-            "p_mem",
-            f"Context: {item.get('document', '')}\nQuery: What entity does this describe?\nAnswer: {target_entity}",
-        )
-        p_gen_text = item.get(
-            "p_gen",
-            f"Query: {item.get('query', '')}\nAnswer: {target_entity}",
-        )
+        if self.use_thinking:
+            mem_prompt, _, p_mem_text = format_thinking_prompt_and_completion(item, is_mem=True)
+            gen_prompt, _, p_gen_text = format_thinking_prompt_and_completion(item, is_mem=False)
+            p_mem_prompt = f"{mem_prompt}\n<think>\n"
+            p_gen_prompt = f"{gen_prompt}\n<think>\n"
+        else:
+            p_mem_text = item.get(
+                "p_mem",
+                f"Context: {item.get('document', '')}\nQuery: What entity does this describe?\nAnswer: {target_entity}",
+            )
+            p_gen_text = item.get(
+                "p_gen",
+                f"Query: {item.get('query', '')}\nAnswer: {target_entity}",
+            )
+            sep = ANSWER_SEP
+            mem_sep_pos = p_mem_text.rfind(sep)
+            gen_sep_pos = p_gen_text.rfind(sep)
+            p_mem_prompt = p_mem_text[: mem_sep_pos + len(sep)] if mem_sep_pos != -1 else p_mem_text
+            p_gen_prompt = p_gen_text[: gen_sep_pos + len(sep)] if gen_sep_pos != -1 else p_gen_text
 
         # Completion-only labels via character-level splitting
         mem_ids, mem_mask, mem_labels = _make_completion_only_labels_char_split(
@@ -197,15 +256,7 @@ class PairedSTaRKDataset(Dataset):
             p_gen_text, self.tokenizer, self.max_length
         )
 
-        # Build PROMPT-ONLY versions for evaluation (text up to '\nAnswer:' without entity)
-        # These are fed to model.generate() to measure true A_mem and A_gen accuracy.
-        sep = ANSWER_SEP
-        mem_sep_pos = p_mem_text.rfind(sep)
-        gen_sep_pos = p_gen_text.rfind(sep)
-        p_mem_prompt = p_mem_text[: mem_sep_pos + len(sep)] if mem_sep_pos != -1 else p_mem_text
-        p_gen_prompt = p_gen_text[: gen_sep_pos + len(sep)] if gen_sep_pos != -1 else p_gen_text
-
-        # Entity span (for Patchscope diagnostics)
+        # Entity span (for Patchscope / KCR routing)
         head_enc = self.tokenizer(head_entity, add_special_tokens=False)
         head_token_ids = head_enc.input_ids if head_enc.input_ids else [0]
 
@@ -262,8 +313,9 @@ def get_kug_dataloader(
     batch_size: int = 4,
     max_length: int = 512,
     shuffle: bool = True,
+    use_thinking: bool = False,
 ) -> DataLoader:
-    dataset = PairedSTaRKDataset(jsonl_path, tokenizer, max_length=max_length)
+    dataset = PairedSTaRKDataset(jsonl_path, tokenizer, max_length=max_length, use_thinking=use_thinking)
     return DataLoader(
         dataset,
         batch_size=batch_size,

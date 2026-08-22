@@ -94,16 +94,18 @@ def train_kug(args):
     print(f"Batch Size: {args.batch_size}, Grad Accum: {args.gradient_accumulation_steps}")
     print(f"LR: {args.learning_rate}, LoRA r={args.lora_r}, alpha={args.lora_alpha}")
 
-    out_dir = Path(args.output_dir) / f"{args.method}_qwen2.5-1.5b"
+    model_slug = Path(args.model_name_or_path).name.lower()
+    out_dir = Path(args.output_dir) / f"{args.method}_{model_slug}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize W&B
     wandb_run = wandb.init(
         project=args.wandb_project,
-        name=f"train_v2_{args.method}_qwen2.5-1.5b",
+        name=f"train_v2_{args.method}_{model_slug}",
         config={
             "method": args.method,
             "base_model": args.model_name_or_path,
+            "use_thinking": args.use_thinking,
             "num_epochs": args.num_epochs,
             "batch_size": args.batch_size,
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
@@ -124,6 +126,7 @@ def train_kug(args):
         "wandb_project": args.wandb_project,
         "method": args.method,
         "base_model": args.model_name_or_path,
+        "use_thinking": args.use_thinking,
         "dataset_path": args.dataset_path,
         "num_epochs": args.num_epochs,
         "output_dir": str(out_dir.resolve()),
@@ -171,6 +174,7 @@ def train_kug(args):
         batch_size=args.batch_size,
         max_length=args.max_length,
         shuffle=True,
+        use_thinking=args.use_thinking,
     )
 
     # ── Verify completion masking on first N samples directly (no shuffle bias) ──
@@ -337,6 +341,7 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--use_thinking", action="store_true", default=False, help="Use structured thinking traces (<think>...</think>) for reasoning models")
     args = parser.parse_args()
 
     train_kug(args)

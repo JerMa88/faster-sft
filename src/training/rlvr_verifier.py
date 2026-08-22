@@ -29,7 +29,10 @@ def normalize_text(text: str) -> str:
 
 
 def extract_answer_text(completion: str) -> str:
-    """Extract candidate text after the last '\\nAnswer:' separator if present."""
+    """Extract candidate text after the last '\\nAnswer:' separator or after '</think>'."""
+    if "</think>" in completion:
+        completion = completion.split("</think>")[-1].strip()
+
     sep = "\nAnswer:"
     pos = completion.rfind(sep)
     if pos != -1:

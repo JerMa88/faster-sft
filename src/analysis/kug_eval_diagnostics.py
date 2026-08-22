@@ -32,18 +32,11 @@ os.environ["HF_HOME"] = HF_CACHE
 os.environ["TRANSFORMERS_CACHE"] = HF_CACHE
 os.environ["HF_DATASETS_CACHE"] = HF_CACHE
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
-from src.data.paired_dataloader import PairedSTaRKDataset
-
+from src.evaluation.metrics import relaxed_exact_match, strict_exact_match
 
 def relaxed_match(predicted: str, target: str) -> bool:
-    """Relaxed EM: gold answer as substring (case-insensitive)."""
-    p = predicted.strip().lower()
-    t = target.strip().lower()
-    if not t:
-        return False
-    return t in p or p in t
+    """Standard relaxed exact match (gold entity substring in predicted output)."""
+    return relaxed_exact_match(predicted, target)
 
 
 def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda", batch_size=16):
@@ -72,6 +65,7 @@ def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda", batch
     def _batched_generate(prompts):
         """Generate outputs for a list of prompt strings in batches."""
         all_preds = []
+        tokenizer.padding_side = "left"
         for i in range(0, len(prompts), batch_size):
             batch_prompts = prompts[i:i + batch_size]
             enc = tokenizer(
@@ -80,18 +74,16 @@ def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda", batch
                 padding=True,
                 truncation=True,
                 max_length=512,
-                padding_side="left",
             ).to(device)
+            prompt_len = enc.input_ids.shape[1]
             with torch.no_grad():
                 out_ids = model.generate(
                     **enc,
-                    max_new_tokens=96,
+                    max_new_tokens=64,
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
                 )
-            # Decode only the new tokens (after the prompt)
-            for j, (in_ids, out) in enumerate(zip(enc.input_ids, out_ids)):
-                prompt_len = in_ids.shape[0]
+            for out in out_ids:
                 pred = tokenizer.decode(
                     out[prompt_len:], skip_special_tokens=True
                 ).strip()
@@ -104,25 +96,35 @@ def run_evaluation_on_checkpoint(model, tokenizer, dataset, device="cuda", batch
 
     for item in all_items:
         task = item["task_type"]
-        p_mem_prompt = item.get("p_mem_prompt", item["p_mem_text"])
-        p_gen_prompt = item.get("p_gen_prompt", item["p_gen_text"])
-        mem_prompts.append(p_mem_prompt)
-        gen_prompts.append(p_gen_prompt)
+        p_mem_text = item.get("p_mem_text", item.get("p_mem", ""))
+        p_gen_text = item.get("p_gen_text", item.get("p_gen", ""))
 
-        # Gold targets: read from text after \nAnswer:
-        p_mem_text = item.get("p_mem_text", "")
-        p_gen_text = item.get("p_gen_text", "")
         mem_sep = p_mem_text.rfind(sep)
         gen_sep = p_gen_text.rfind(sep)
-        gold_mem = p_mem_text[mem_sep + len(sep):].strip() if mem_sep != -1 else item["target_entity"]
-        gold_gen = p_gen_text[gen_sep + len(sep):].strip() if gen_sep != -1 else item["target_entity"]
+
+        if mem_sep != -1:
+            p_mem_prompt = p_mem_text[:mem_sep + len(sep)]
+            gold_mem = p_mem_text[mem_sep + len(sep):].strip()
+        else:
+            p_mem_prompt = p_mem_text + sep
+            gold_mem = item.get("target_entity", "")
+
+        if gen_sep != -1:
+            p_gen_prompt = p_gen_text[:gen_sep + len(sep)]
+            gold_gen = p_gen_text[gen_sep + len(sep):].strip()
+        else:
+            p_gen_prompt = p_gen_text + sep
+            gold_gen = item.get("target_entity", "")
+
+        mem_prompts.append(p_mem_prompt)
+        gen_prompts.append(p_gen_prompt)
         gold_mem_targets.append(gold_mem)
         gold_gen_targets.append(gold_gen)
         task_labels.append(task)
 
     # Batched generation
     pred_mems = _batched_generate(mem_prompts)
-    pred_gens  = _batched_generate(gen_prompts)
+    pred_gens = _batched_generate(gen_prompts)
 
     # Score
     for task, pred_mem, gold_mem, pred_gen, gold_gen in zip(

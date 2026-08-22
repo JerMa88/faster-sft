@@ -26,6 +26,8 @@ import numpy as np
 def normalize_answer(s: str) -> str:
     """Normalize an answer string: strip, lowercase, collapse whitespace."""
     import re
+    if "</think>" in s:
+        s = s.split("</think>")[-1]
     s = s.strip().lower()
     s = re.sub(r'\s+', ' ', s)
     # Remove trailing punctuation that models sometimes add
@@ -53,6 +55,8 @@ def normalize_answer_strict(s: str) -> str:
     """
     import re
     import string
+    if "</think>" in s:
+        s = s.split("</think>")[-1]
     s = s.strip().lower()
     s = s.translate(str.maketrans('', '', string.punctuation))
     s = re.sub(r'\s+', ' ', s).strip()

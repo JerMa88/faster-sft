@@ -53,7 +53,7 @@ class RLVRQueryDataset(Dataset):
     Dataset supplying prompt-only inputs for RLVR rollouts, paired memory prompts for OPRD, and target verification.
     """
 
-    def __init__(self, jsonl_path: str, use_cot: bool = False):
+    def __init__(self, jsonl_path: str, use_cot: bool = False, use_thinking: bool = False):
         self.data = []
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -65,19 +65,25 @@ class RLVRQueryDataset(Dataset):
                     sep_pos = p_gen_full.rfind(ANSWER_SEP)
                     sep_mem_pos = p_mem_full.rfind(ANSWER_SEP)
 
-                    if use_cot and task_type == "chaining":
-                        query = p_gen_full[: sep_pos] if sep_pos != -1 else p_gen_full
+                    query = p_gen_full[: sep_pos].strip() if sep_pos != -1 else p_gen_full.strip()
+                    query_mem = p_mem_full[: sep_mem_pos].strip() if sep_mem_pos != -1 else p_mem_full.strip()
+
+                    if use_thinking:
+                        p_gen_prompt = f"{query}\n<think>\n"
+                        p_mem_prompt = f"{query_mem}\n<think>\n"
+                    elif use_cot and task_type == "chaining":
                         p_gen_prompt = f"{query}\nThought: "
+                        p_mem_prompt = f"{query_mem}\nAnswer:"
                     else:
                         if sep_pos != -1:
                             p_gen_prompt = p_gen_full[: sep_pos + len(ANSWER_SEP)]
                         else:
                             p_gen_prompt = p_gen_full
 
-                    if sep_mem_pos != -1:
-                        p_mem_prompt = p_mem_full[: sep_mem_pos + len(ANSWER_SEP)]
-                    else:
-                        p_mem_prompt = p_mem_full
+                        if sep_mem_pos != -1:
+                            p_mem_prompt = p_mem_full[: sep_mem_pos + len(ANSWER_SEP)]
+                        else:
+                            p_mem_prompt = p_mem_full
 
                     self.data.append({
                         "id": item.get("id", ""),
@@ -91,7 +97,7 @@ class RLVRQueryDataset(Dataset):
                         "fc_label": item.get("fc_label", ""),
                     })
 
-        print(f"[RLVRQueryDataset] Loaded {len(self.data)} prompts from {jsonl_path} (use_cot={use_cot})")
+        print(f"[RLVRQueryDataset] Loaded {len(self.data)} prompts from {jsonl_path} (use_cot={use_cot}, use_thinking={use_thinking})")
 
     def __len__(self) -> int:
         return len(self.data)
@@ -197,7 +203,7 @@ def train_rlvr(args):
     optimizer = AdamW(trainable_params, lr=args.learning_rate, weight_decay=args.weight_decay)
 
     # Dataloader
-    dataset = RLVRQueryDataset(args.dataset_path, use_cot=args.use_cot)
+    dataset = RLVRQueryDataset(args.dataset_path, use_cot=args.use_cot, use_thinking=args.use_thinking)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -477,6 +483,7 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=96)
     parser.add_argument("--kl_beta", type=float, default=0.04)
     parser.add_argument("--clip_eps", type=float, default=0.2)
+    parser.add_argument("--use_thinking", action="store_true", default=False, help="Use structured thinking traces (<think>...</think>) for reasoning models")
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     args = parser.parse_args()
